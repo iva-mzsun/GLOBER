@@ -1,0 +1,196 @@
+model:
+  base_learning_rate: 1e-5
+  target: cldm.cldmae.ControlAutoEncLDM
+  params:
+    noisy_prex: False
+#    optimizer: 'hybridadam'
+    sd_lock_input: True
+    sd_lock_middle: False
+    sd_lock_output: False
+    linear_start: 0.00085
+    linear_end: 0.0120
+    num_timesteps_cond: 1
+    log_every_t: 200
+    timesteps: 1000
+    cond_stage_key: "txt"
+    frame_index_key: "frame_index"
+    index_embed_dim: 256
+    image_size: 32
+    channels: 4
+    cond_stage_trainable: false
+    conditioning_key: crossattn
+    monitor: val/loss_simple_ema
+    scale_factor: 0.18215
+    use_ema: False
+    only_mid_control: False
+    learn_logvar: False
+
+    fullvideo_key: "full_frame"
+    videoenc_config:
+      target: cldm.cldmae.VideoContentEnc
+      params:
+        dims: 3
+        use_checkpoint: True
+        image_size: 32 # unused
+        in_channels: 4
+        out_channels: 1024
+        model_channels: 320
+        attention_resolutions: [ 4, 2, 1 ]
+        num_res_blocks: 2
+        channel_mult: [ 1, 2, 3, 4 ]
+        num_head_channels: 64 # need to fix for flash-attn
+        legacy: False
+
+    preframe_key: "src_frame"
+    preframe_config:
+      target: cldm.cldmae.PreframeProcessNet
+      params:
+        image_size: 32 # unused
+        in_channels: 4
+        prex_channels: 4
+        model_channels: 320
+        attention_resolutions: [ 4, 2, 1 ]
+        num_res_blocks: 2
+        channel_mult: [ 1, 2, 4, 4 ]
+        num_heads: 8
+        use_spatial_transformer: True
+        transformer_depth: 1
+        context_dim: 768
+        use_checkpoint: True
+        legacy: False
+
+    unet_config:
+      target: cldm.cldmae.ControlledUnetModel
+      params:
+        image_size: 32 # unused
+        in_channels: 4
+        out_channels: 4
+        model_channels: 320
+        attention_resolutions: [ 4, 2, 1 ]
+        num_res_blocks: 2
+        channel_mult: [ 1, 2, 4, 4 ]
+        num_heads: 8
+        use_spatial_transformer: True
+        transformer_depth: 1
+        context_dim: 768
+        use_checkpoint: True
+        legacy: False
+
+    first_stage_key: "tar_frame" # current video frame
+    first_stage_config:
+      target: ldm.models.autoencoder.AutoencoderKL
+      params:
+        embed_dim: 4
+        monitor: val/rec_loss
+        ddconfig:
+          double_z: true
+          z_channels: 4
+          resolution: 256
+          in_channels: 3
+          out_ch: 3
+          ch: 128
+          ch_mult:
+          - 1
+          - 2
+          - 4
+          - 4
+          num_res_blocks: 2
+          attn_resolutions: []
+          dropout: 0.0
+        lossconfig:
+          target: torch.nn.Identity
+
+    cond_stage_config:
+      target: ldm.modules.encoders.modules.FrozenCLIPEmbedder
+
+data:
+  target: main.DataModuleFromConfig
+  params:
+    wrap: False
+    batch_size: 8
+    num_workers: 4
+    train:
+      target: cldm.data.custom.VideoFolderDataset_AE
+      params:
+        size: 256
+        flip_p: 0.5
+        start_zero_p: 0.2
+#        max_data_num: 96 # For debug
+        content_frame_idx:
+          - 0
+          - 5
+          - 10
+          - 15
+        full_video_length: 16
+        root: /home/zhongguokexueyuanzidonghuayanjiusuo/datasets/UCF-101/frames_fps20
+    validation:
+      target: cldm.data.custom.VideoFolderDataset_AE
+      params:
+        size: 256
+        flip_p: 0.5
+        start_zero_p: 0.2
+        max_data_num: 2048
+#        max_data_num: 96 # for debug
+        content_frame_idx:
+          - 0
+          - 5
+          - 10
+          - 15
+        full_video_length: 16
+        root: /home/zhongguokexueyuanzidonghuayanjiusuo/datasets/UCF-101/frames_fps20
+
+lightning:
+  trainer:
+    ckpt_load_strict: False
+    accelerator: 'gpu'
+    devices: 4
+    log_gpu_memory: all
+    max_epochs: 500
+    precision: 16
+    auto_select_gpus: False
+    strategy:
+      target: strategies.DDPStrategy
+      params:
+        find_unused_parameters: True
+#    strategy:
+#      target: strategies.ColossalAIStrategy
+#      params:
+#        use_chunk: True
+#        enable_distributed_storage: True
+#        placement_policy: cuda
+#        force_outputs_fp32: true
+#        min_chunk_size: 64
+
+    log_every_n_steps: 2
+    logger: True
+    default_root_dir: "experiments/"
+
+#  callbacks:
+#    image_logger:
+#      target: main.ImageLogger
+#      params:
+#        batch_frequency: 200
+#        max_images: 4
+#        increase_log_steps: False
+#        log_first_step: True
+#        log_all_val: True
+#        log_images_kwargs:
+#          ddim_steps: 200
+#          use_ema_scope: True
+#          inpaint: False
+#          plot_progressive_rows: False
+#          plot_diffusion_rows: False
+#          N: 4
+#          unconditional_guidance_scale: 3.0
+#          unconditional_guidance_label: [ "" ]
+
+  logger:
+    wandb:
+      target: lightning.pytorch.loggers.WandbLogger
+      params:
+          project: control
+          group: ucf101
+          name: nowname
+          save_dir: "experiments/"
+          offline: opt.debug
+          id: nowname
