@@ -2,28 +2,21 @@ import einops
 import torch
 import torch as th
 import torch.nn as nn
-import numpy as np
 
 from ldm.modules.diffusionmodules.util import (
     conv_nd,
     linear,
-    zero_module,pass_module,
-    timestep_embedding,
-    index_embedding
+    zero_module, timestep_embedding
 )
 
 from tqdm import tqdm
 from einops import rearrange, repeat
-from torchvision.utils import make_grid
-from ldm.modules.attention import SpatialTransformer
 from ldm.modules.diffusionmodules.openaimodel import UNetModel, TimestepEmbedSequential, ResBlock, \
-    Downsample, AttentionBlock, normalization, ResBlock2n
+    Downsample, normalization, ResBlock2n
 from ldm.models.diffusion.ddpm import LatentDiffusion
-from ldm.util import log_txt_as_img, exists, instantiate_from_config, default, modulate
+from ldm.util import log_txt_as_img, instantiate_from_config, default
 from ldm.models.diffusion.ddim import DDIMSampler
-from cldm.blocks import ResBlockwoEmb, TemporalAttentionBlock, SpatialAttentionBlock, SpatioTemporalDownsample
-
-from ipdb import set_trace as st
+from cldm.utils.blocks import ResBlockwoEmb, TemporalAttentionBlock, SpatialAttentionBlock
 
 
 class VideoContentEnc(nn.Module):
@@ -378,7 +371,7 @@ class AutoEncLDM(LatentDiffusion):
 
         if sample:
             # get denoise row
-            samples, z_denoise_row = self.sample_log(cond=new_cond,
+            samples, z_denoise_row = self.sample_log(cond=new_cond, verbose=verbose,
                                                      batch_size=N, ddim=use_ddim,
                                                      ddim_steps=ddim_steps, eta=ddim_eta)
             x_samples = self.decode_first_stage(samples)
@@ -427,7 +420,7 @@ class AutoEncLDM(LatentDiffusion):
             for f in td:
                 ind = torch.ones_like(ind) * f / n_frames
                 new_cond["c_index"] = [ind]
-                frames, _ = self.sample_log(cond=new_cond, batch_size=N, ddim=use_ddim,
+                frames, _ = self.sample_log(cond=new_cond, batch_size=N, ddim=use_ddim, verbose=verbose,
                                             ddim_steps=ddim_steps, eta=ddim_eta)
                 samples.append(self.decode_first_stage(frames).unsqueeze(1))
             x_samples = torch.cat(samples, dim=1) # b, t, c, h, w

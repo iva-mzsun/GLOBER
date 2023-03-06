@@ -170,6 +170,8 @@ class VideoFolderDataset_AEwT(Dataset):
         # load data
         self.videos = sorted(os.listdir(root))
         if max_data_num is not None:
+            from random import shuffle
+            shuffle(self.videos)
             self.videos = self.videos[:max_data_num]
         self.vid2img = dict({})
         self.vidpoint = dict({})
@@ -223,7 +225,9 @@ class VideoFolderDataset_AEwT(Dataset):
         for ind in tar_indexes:
             tar_frame = self.load_img(frames[point + ind], if_flip)
             tar_frames.append(tar_frame[:, np.newaxis, :, :])
-        tar_indexes /= self.full_video_length
+
+        tar_indexes = tar_indexes.astype(np.float) / self.full_video_length
+        # tar_indexes =  self.full_video_length
         tar_frames = np.concatenate(tar_frames, axis=1)
 
         return dict({

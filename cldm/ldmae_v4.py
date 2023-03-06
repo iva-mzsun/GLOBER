@@ -2,27 +2,22 @@ import einops
 import torch
 import torch as th
 import torch.nn as nn
-import numpy as np
 
 from ldm.modules.diffusionmodules.util import (
     conv_nd,
     linear,
-    zero_module,pass_module,
-    timestep_embedding,
-    index_embedding
+    zero_module, timestep_embedding
 )
 
 from tqdm import tqdm
 from einops import rearrange, repeat
-from torchvision.utils import make_grid
-from ldm.modules.attention import SpatialTransformer
 from ldm.modules.diffusionmodules.openaimodel import UNetModel, TimestepEmbedSequential, ResBlock, \
-    Downsample, AttentionBlock, normalization, ResBlock2n
-from ldm.models.diffusion.ddpm import LatentDiffusion
-from ldm.util import log_txt_as_img, exists, instantiate_from_config, default, modulate
+    Downsample, normalization, ResBlock2n
+from cldm.diffusion.ddpm_v4 import LatentDiffusion
+from ldm.util import log_txt_as_img, instantiate_from_config, default
 from ldm.models.diffusion.ddim import DDIMSampler
-from cldm.blocks import ResBlockwoEmb, TemporalAttentionBlock, SpatialAttentionBlock, \
-    SpatioTemporalDownsample, SpatioTemporalAttentionBlock
+from cldm.utils.blocks import ResBlockwoEmb, TemporalAttentionBlock, SpatialAttentionBlock, \
+    SpatioTemporalAttentionBlock
 
 from ipdb import set_trace as st
 
@@ -79,6 +74,10 @@ class SeqDiscriminator(nn.Module):
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
+
+        # create learnable embeddings to distinguish pre/cur video frame
+        shape = (1, in_channels, 2, image_size, image_size)
+        self.frame_embed = nn.Parameter(torch.randn(shape), requires_grad=True)
 
         # create input blocks
         self.input_blocks = nn.ModuleList([
@@ -142,24 +141,24 @@ class SeqDiscriminator(nn.Module):
 
         # obtain video content feature
         self.out = nn.Sequential(
-            conv_nd(dims, ch, self.out_channels, 3, padding=1),
-            normalization(self.out_channels),
+            conv_nd(dims, ch, model_channels, 3, padding=1),
+            normalization(model_channels),
             nn.SiLU(),
             nn.AdaptiveAvgPool3d((1, 1, 1)),
-            nn.flatten(),
-            nn.Linear(self.out_channels, 1)
+            nn.Flatten(), # B, C
+            nn.Linear(model_channels, 1)
         )
 
-    def forward(self, x, index, **kwargs):
+    def forward(self, x, **kwargs):
         '''
-        x: [b, c, t, h, w]
-        ind: [b]
+        x: [(b t), c, 2, h, w]
         '''
         h = x.type(self.dtype)
+        h = h + self.frame_embed
         for module in self.input_blocks:
             h = module(h)
-        value = self.out(h)
-        return value # B, 1
+        logit = self.out(h).squeeze(1)
+        return logit # B
 
 class VideoContentEnc(nn.Module):
     def __init__(
@@ -351,7 +350,7 @@ class VideoContentEnc(nn.Module):
     def forward(self, x, index, **kwargs):
         '''
         x: [b, c, t, h, w]
-        ind: [b]
+        ind: [b, t]
         '''
 
         # obtain vc
@@ -371,6 +370,7 @@ class VideoContentEnc(nn.Module):
             vc = vc.squeeze(2) # B, C, H, W
 
         # obtain index embedding
+        index = rearrange(index, 'b t -> (b t)')
         index_emb = timestep_embedding(index, self.model_channels)
         index_emb = self.index_embed(index_emb)
         # obtain insert feat
@@ -405,10 +405,13 @@ class AEUnetModel(UNetModel):
 class AutoEncLDM(LatentDiffusion):
 
     def __init__(self,
+                 generator_loss_weight,
                  seq_discriminator_config,
+                 adversarial_loss,
                  videoenc_config, videocontent_key,
                  frame_index_key, optimize_params_key,
                  sd_lock_output, sd_lock_input, sd_lock_middle,
+                 xrec_label_real=True,
                  optimizer="adam", *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.optimizer = optimizer
@@ -416,6 +419,8 @@ class AutoEncLDM(LatentDiffusion):
         self.sd_lock_middle = sd_lock_middle
         self.sd_lock_output = sd_lock_output
         self.optimize_params_key = optimize_params_key
+        self.xrec_label_real = xrec_label_real
+        print(f"!!! xrec_label_real: {xrec_label_real}")
         # obtain video content
         self.videocontent_key = videocontent_key
         videoenc_config['params']['sdinput_block_ds'] = self.model.diffusion_model.input_block_ds
@@ -425,36 +430,81 @@ class AutoEncLDM(LatentDiffusion):
         self.frame_index_key = frame_index_key
         # obtain discriminator
         self.seq_discriminator = instantiate_from_config(seq_discriminator_config)
+        self.generator_loss_weight = generator_loss_weight
+        if adversarial_loss == "hinge":
+            from cldm.utils.gan_loss import hinge_d_loss
+            self.adversarial_loss = hinge_d_loss
+        else:
+            raise NotImplementedError
 
-    def obtain_disc_input_label(self, x):
-        # x: [b c t h w]
-        B, C, T, H, W = x.shape
-        index = list(range(T))
+    def obtain_disc_label(self, batch, x, real):
+        # label: 0 - fake, 1 - real
+        B, T = batch[self.frame_index_key].shape
 
+        cur_indexes = batch[self.frame_index_key] # [b, t]
+        pre_indexes = torch.roll(cur_indexes, shifts=1, dims=1)
+        cur_indexes = rearrange(cur_indexes, 'b t -> (b t)')
+        pre_indexes = rearrange(pre_indexes, 'b t -> (b t)')
+        if real:
+            label = pre_indexes < cur_indexes
+        else:
+            label = torch.zeros_like(pre_indexes)
+
+        curx = rearrange(x, '(b t) c h w -> b t c h w', b=B, t=T)
+        prex = torch.roll(curx, shifts=1, dims=1)
+        curx = rearrange(curx, 'b t c h w -> (b t) c h w')
+        prex = rearrange(prex, 'b t c h w -> (b t) c h w')
+        curx = curx.unsqueeze(2)
+        prex = prex.unsqueeze(2)
+        outx = torch.cat([prex, curx], dim=2) # (b t) c 2 h w
+        return outx, label
 
     def training_step(self, batch, batch_idx, optimizer_idx):
-        if optimizer_idx == 0:
-            for k in self.ucg_training:
-                p = self.ucg_training[k]["p"]
-                val = self.ucg_training[k]["val"]
-                if val is None:
-                    val = ""
-                for i in range(len(batch[k])):
-                    if self.ucg_prng.choice(2, p=[1 - p, p]):
-                        batch[k][i] = val
+        for k in self.ucg_training:
+            p = self.ucg_training[k]["p"]
+            val = self.ucg_training[k]["val"]
+            if val is None:
+                val = ""
+            for i in range(len(batch[k])):
+                if self.ucg_prng.choice(2, p=[1 - p, p]):
+                    batch[k][i] = val
 
-            loss, loss_dict, x_start, x_recon = self.shared_step(batch)
+        if optimizer_idx == 0:
+            loss, loss_dict, _, x_recon = self.shared_step(batch, returnx=True) # x: [(b t) c h w]
             # log lr and custom losses
-            lr = self.optimizers().param_groups[0]['lr']
+            lr = self.optimizers()[optimizer_idx].param_groups[0]['lr']
             self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
             self.log_dict(loss_dict, prog_bar=True, logger=True, on_step=True, on_epoch=True)
             self.log("global_step", self.global_step, prog_bar=True, logger=True, on_step=True, on_epoch=False)
             # log discriminator loss
+            cat_x, label = self.obtain_disc_label(batch, x_recon, real=True)
+            for p in self.seq_discriminator.parameters():
+                p.requires_grad = True
+            logit = self.seq_discriminator(cat_x)
+            g_loss = self.adversarial_loss(logit, label) # reverse label
+            self.log("train/g_loss", g_loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            return loss + g_loss * self.generator_loss_weight
 
+        if optimizer_idx == 1:
+            with torch.no_grad():
+                _, _, x_start, x_recon = self.shared_step(batch, returnx=True)  # x: [(b t) c h w]
+                x_start, x_recon = x_start.detach(), x_recon.detach()
+            cat_x_start, label_start = self.obtain_disc_label(batch, x_start, real=True)
+            cat_x_recon, label_recon = self.obtain_disc_label(batch, x_recon,
+                                                              real=self.xrec_label_real)
+            logit_start = self.seq_discriminator(cat_x_start)
+            logit_recon = self.seq_discriminator(cat_x_recon)
+            d_loss_start = self.adversarial_loss(logit_start, label_start)
+            d_loss_recon = self.adversarial_loss(logit_recon, label_recon)
+            d_loss = (d_loss_start + d_loss_recon) / 2
+            lr = self.optimizers()[optimizer_idx].param_groups[0]['lr']
+            self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
+            self.log("train/d_loss", d_loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            self.log("train/d_loss_start", d_loss_start, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            self.log("train/d_loss_recon", d_loss_recon, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            return d_loss
 
-
-
-    def p_losses(self, x_start, cond, t, noise=None):
+    def p_losses(self, x_start, cond, t, returnx=False, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
         model_output = self.apply_model(x_noisy, t, cond)
@@ -497,14 +547,18 @@ class AutoEncLDM(LatentDiffusion):
         else:
             raise NotImplementedError()
 
-        return loss, loss_dict, x_start, x_recon
+        if returnx:
+            return loss, loss_dict, x_start, x_recon
+        return loss, loss_dict
 
     @torch.no_grad()
     def get_input(self, batch, k, bs=None, *args, **kwargs):
         x, c = super().get_input(batch, self.first_stage_key,
-                                     *args, **kwargs) # x: [b c h w], c: [b c]
+                                 bs=bs, *args, **kwargs) # x: [b c h w], c: [b c]
         # encode full video frames
         vidcontent = batch[self.videocontent_key].to(self.device)
+        if bs is not None:
+            vidcontent = vidcontent[:bs]
         vidcontent = einops.rearrange(vidcontent, 'b c t h w -> (b t) c h w')
         vidcontent = vidcontent.to(memory_format=torch.contiguous_format).float()
         vidcontent = self.encode_first_stage(vidcontent)
@@ -512,6 +566,8 @@ class AutoEncLDM(LatentDiffusion):
         vidcontent = rearrange(vidcontent, '(b t) c h w -> b c t h w', b=x.shape[0])
         # obtain target frame index embedding
         frame_indexes = batch[self.frame_index_key].to(self.device)
+        if bs is not None:
+            frame_indexes = frame_indexes[:bs]
         return x, dict(c_crossattn=[c], c_video=[vidcontent], c_index=[frame_indexes])
 
     def apply_model(self, x_noisy, t, cond, *args, **kwargs):
@@ -577,32 +633,32 @@ class AutoEncLDM(LatentDiffusion):
         return log
 
     @torch.no_grad()
-    def log_videos(self, batch, N=16, n_frames=16, sample=False, ddim_steps=50, ddim_eta=0.0,
+    def log_videos(self, batch, N=2, n_frames=4, sample=True, ddim_steps=50, ddim_eta=0.0,
                    plot_denoise_rows=False, verbose=False, unconditional_guidance_scale=9.0, **kwargs):
+        B, T = batch[self.frame_index_key].shape
+        N = min(B, N)
         # obtain inputs
         use_ddim = ddim_steps is not None
         z, cond = self.get_input(batch, self.first_stage_key, bs=N)
         td = tqdm(range(n_frames)) if verbose else range(n_frames)
         # obtain conditions
-        N = min(z.shape[0], N)
-        vc = cond["c_video"][0][:N]
-        ind = cond["c_index"][0][:N]
-        c = cond["c_crossattn"][0][:N]
+        vc = cond["c_video"][0]
+        ind = cond["c_index"][0]
+        c = cond["c_crossattn"][0]
         new_cond = {"c_video": [vc], "c_crossattn": [c]}
         # obtain logs
         log = dict()
-        log["reconstruction"] = self.decode_first_stage(z[:N])
+        log["reconstruction"] = self.decode_first_stage(z)
         log['full_frames'] = rearrange(batch[self.videocontent_key].to(self.device),
-                                       'b c t h w -> (b t) c h w')
-        log["conditioning"] = log_txt_as_img((512, 512), batch[self.cond_stage_key], size=16)
+                                       'b c t h w -> b c h (t w)')
         # start sampling
         if sample:
             samples = []
             for f in td:
                 ind = torch.ones_like(ind) * f / n_frames
                 new_cond["c_index"] = [ind]
-                frames, _ = self.sample_log(cond=new_cond, batch_size=N, ddim=use_ddim,
-                                            ddim_steps=ddim_steps, eta=ddim_eta)
+                frames, _ = self.sample_log(cond=new_cond, batch_size=N*T, ddim=use_ddim,
+                                            ddim_steps=ddim_steps, eta=ddim_eta, verbose=verbose)
                 samples.append(self.decode_first_stage(frames).unsqueeze(1))
             x_samples = torch.cat(samples, dim=1) # b, t, c, h, w
             x_samples = rearrange(x_samples, 'b t c h w -> (b t) c h w')
@@ -610,14 +666,14 @@ class AutoEncLDM(LatentDiffusion):
 
         if unconditional_guidance_scale > 1.0:
             uc_video = torch.zeros_like(vc)
-            uc_cross = self.get_unconditional_conditioning(N)
+            uc_cross = self.get_unconditional_conditioning(N*T)
             uc_cond = {"c_crossattn": [uc_cross], "c_video": [uc_video]}
             samples_ug = []
             for f in td:
                 ind = torch.ones_like(ind) * f / n_frames
                 uc_cond["c_index"] = [ind]
                 new_cond["c_index"] = [ind]
-                frames_ug, _ = self.sample_log(cond=new_cond, batch_size=N, ddim=use_ddim,
+                frames_ug, _ = self.sample_log(cond=new_cond, batch_size=N*T, ddim=use_ddim,
                                                ddim_steps=ddim_steps, eta=ddim_eta, verbose=False,
                                                unconditional_conditioning=uc_cond,
                                                unconditional_guidance_scale=unconditional_guidance_scale)
@@ -641,26 +697,17 @@ class AutoEncLDM(LatentDiffusion):
         g_params = list(self.videocontent_enc.parameters())
         # add select params
         for n, p in self.model.diffusion_model.named_parameters():
-            for key in self.optimize_params_key:
-                if key in n:
-                    print("Add optimize parameters: ", n)
-                    g_params.append(p)
-        # Judge if optimize blocks of stable diffusion
-        if not self.sd_lock_input:
-            print("Add optimize parameters: \n",
-                  list(self.model.diffusion_model.input_blocks.parameters()))
-            g_params += list(self.model.diffusion_model.input_blocks.parameters())
-        if not self.sd_lock_middle:
-            print("Add optimize parameters: \n",
-                  list(self.model.diffusion_model.middle_block.parameters()))
-            g_params += list(self.model.diffusion_model.middle_block.parameters())
-        if not self.sd_lock_output:
-            print("Add optimize parameters: \n",
-                  list(self.model.diffusion_model.output_blocks.parameters()))
-            print("Add optimize parameters: \n",
-                  list(self.model.diffusion_model.out.parameters()))
-            g_params += list(self.model.diffusion_model.output_blocks.parameters())
-            g_params += list(self.model.diffusion_model.out.parameters())
+            flag = False
+            if self.optimize_params_key is not None:
+                for key in self.optimize_params_key:
+                    flag = True if key in n else flag
+            flag = flag or (n[:5] == "input" and not self.sd_lock_input)
+            flag = flag or (n[:3] == "out" and not self.sd_lock_output)
+            flag = flag or (n[:6] == "middle" and not self.sd_lock_middle)
+            if flag:
+                print("Add optimize parameters: ", n)
+                g_params.append(p)
+
         # == parameters of discriminator ==
         d_params = list(self.seq_discriminator.parameters())
 
@@ -677,22 +724,22 @@ class AutoEncLDM(LatentDiffusion):
             opt_g = torch.optim.AdamW(g_params, lr=lr)
             opt_d = torch.optim.AdamW(d_params, lr=lr)
 
-        if self.use_scheduler:
-            from torch.optim.lr_scheduler import LambdaLR
-            assert 'target' in self.scheduler_config
-            scheduler = instantiate_from_config(self.scheduler_config)
-            print("Setting up LambdaLR scheduler...")
-            scheduler_g = [{
-                    'scheduler': LambdaLR(opt_g, lr_lambda=scheduler.schedule),
-                    'interval': 'step',
-                    'frequency': 1
-                }]
-            scheduler_d = [{
-                'scheduler': LambdaLR(opt_d, lr_lambda=scheduler.schedule),
-                'interval': 'step',
-                'frequency': 1
-            }]
-            return [opt_g, opt_d], [scheduler_g, scheduler_d]
+        # if self.use_scheduler:
+        #     from torch.optim.lr_scheduler import LambdaLR
+        #     assert 'target' in self.scheduler_config
+        #     scheduler = instantiate_from_config(self.scheduler_config)
+        #     print("Setting up LambdaLR scheduler...")
+        #     scheduler_g = [{
+        #             'scheduler': LambdaLR(opt_g, lr_lambda=scheduler.schedule),
+        #             'interval': 'step',
+        #             'frequency': 1
+        #         }]
+        #     scheduler_d = [{
+        #         'scheduler': LambdaLR(opt_d, lr_lambda=scheduler.schedule),
+        #         'interval': 'step',
+        #         'frequency': 1
+        #     }]
+        #     return [opt_g, opt_d], [scheduler_g, scheduler_d]
         return [opt_g, opt_d], []
 
     def low_vram_shift(self, is_diffusing):

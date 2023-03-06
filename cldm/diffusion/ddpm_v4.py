@@ -32,6 +32,7 @@ except:
     import pytorch_lightning as pl
     from pytorch_lightning.utilities import rank_zero_only, rank_zero_info
 
+from ipdb import set_trace as st
 
 __conditioning_keys__ = {'concat': 'c_concat',
                          'crossattn': 'c_crossattn',
@@ -424,10 +425,13 @@ class DDPM(pl.LightningModule):
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
         return self.p_losses(x, t, *args, **kwargs)
 
-    def get_input(self, batch, k):
-        x = batch[k]
-        if len(x.shape) == 3:
-            x = x[..., None]
+    def get_input(self, batch, k, bs=None):
+        x = batch[k] # x: b, c, t, h, w
+        if bs is not None:
+            x = x[:bs]
+        assert len(x.shape) == 5
+        x = rearrange(x, 'b c t h w -> '
+                         '(b t) c h w')
         if self.use_fp16:
             x = x.to(memory_format=torch.contiguous_format).half()
         else:
@@ -439,7 +443,7 @@ class DDPM(pl.LightningModule):
         loss, loss_dict = self(x)
         return loss, loss_dict
 
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch, batch_idx, optimizer_idx):
         for k in self.ucg_training:
             p = self.ucg_training[k]["p"]
             val = self.ucg_training[k]["val"]
@@ -473,7 +477,7 @@ class DDPM(pl.LightningModule):
         self.log_dict(loss_dict_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
 
         if batch_idx == 0:
-            sample_logs = self.log_images(batch, verbose=False)
+            sample_logs = self.log_videos(batch)
             return sample_logs
 
     def on_train_batch_end(self, *args, **kwargs):
@@ -768,11 +772,9 @@ class LatentDiffusion(DDPM):
         return fold, unfold, normalization, weighting
 
     @torch.no_grad()
-    def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
-                  cond_key=None, return_original_cond=False, bs=None, return_x=False):
-        x = super().get_input(batch, k)
-        if bs is not None:
-            x = x[:bs]
+    def get_input(self, batch, k, bs=None, return_first_stage_outputs=False, force_c_encode=False,
+                  cond_key=None, return_original_cond=False, return_x=False):
+        x = super().get_input(batch, k, bs)
         x = x.to(self.device)
         encoder_posterior = self.encode_first_stage(x)
         z = self.get_first_stage_encoding(encoder_posterior).detach()
@@ -789,6 +791,10 @@ class LatentDiffusion(DDPM):
                     xc = super().get_input(batch, cond_key).to(self.device)
             else:
                 xc = x
+
+            if bs is not None:
+                xc = xc[:bs]
+
             if not self.cond_stage_trainable or force_c_encode:
                 if isinstance(xc, dict) or isinstance(xc, list):
                     c = self.get_learned_conditioning(xc)
@@ -796,8 +802,6 @@ class LatentDiffusion(DDPM):
                     c = self.get_learned_conditioning(xc.to(self.device))
             else:
                 c = xc
-            if bs is not None:
-                c = c[:bs]
 
             if self.use_positional_encodings:
                 pos_x, pos_y = self.compute_latent_shifts(batch)
@@ -810,6 +814,10 @@ class LatentDiffusion(DDPM):
             if self.use_positional_encodings:
                 pos_x, pos_y = self.compute_latent_shifts(batch)
                 c = {'pos_x': pos_x, 'pos_y': pos_y}
+
+        T = z.shape[0] // c.shape[0]
+        c = repeat(c, 'b l c -> b t l c', t=T)
+        c = rearrange(c, 'b t l c -> (b t) l c')
         out = [z, c]
         if return_first_stage_outputs:
             xrec = self.decode_first_stage(z)
@@ -835,9 +843,9 @@ class LatentDiffusion(DDPM):
     def encode_first_stage(self, x):
         return self.first_stage_model.encode(x)
 
-    def shared_step(self, batch, **kwargs):
+    def shared_step(self, batch, *args, **kwargs):
         x, c = self.get_input(batch, self.first_stage_key)
-        loss = self(x, c)
+        loss = self(x, c, *args, **kwargs)
         return loss
 
     def forward(self, x, c, *args, **kwargs):

@@ -2,7 +2,6 @@ import einops
 import torch
 import torch as th
 import torch.nn as nn
-import numpy as np
 
 from ldm.modules.diffusionmodules.util import (
     conv_nd,
@@ -14,14 +13,13 @@ from ldm.modules.diffusionmodules.util import (
 from einops import rearrange, repeat
 from torchvision.utils import make_grid
 from ldm.modules.attention import SpatialTransformer
-from ldm.modules.diffusionmodules.openaimodel import UNetModel, TimestepEmbedSequential, ResBlock, \
-    Downsample, AttentionBlock, normalization, TimestepBlock, IndexTimeEmbedSequential, Upsample, IndexstepBlock
+from ldm.modules.diffusionmodules.openaimodel import ResBlock, \
+    Downsample, AttentionBlock, normalization, IndexTimeEmbedSequential, Upsample, IndexstepBlock
 from ldm.models.diffusion.ddpm import LatentDiffusion
 from ldm.util import log_txt_as_img, exists, instantiate_from_config, default, modulate
 from ldm.models.diffusion.ddim import DDIMSampler
-from cldm.blocks import ResBlockwoEmb, TemporalAttentionBlock, SpatialAttentionBlock, SpatioTemporalDownsample
+from cldm.utils.blocks import ResBlockwoEmb, TemporalAttentionBlock, SpatialAttentionBlock
 
-from ipdb import set_trace as st
 
 class AdaLN_ZERO(IndexstepBlock):
     def __init__(self, inch, outch, chunk):

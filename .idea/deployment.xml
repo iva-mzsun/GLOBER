@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="PublishConfigData" autoUpload="Always" serverName="ae" remoteFilesAllowedToDisappearOnAutoupload="false">
+    <serverData>
+      <paths name="72">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/StableBased/stable_video_ae" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="ai_zhuxinxin@172.18.28.102:22 password">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="xinxin.zhu@58.48.42.233:22">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/StableBased/StableVideoAE" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+    </serverData>
+    <option name="myAutoUpload" value="ALWAYS" />
+  </component>
+</project>

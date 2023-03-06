@@ -671,6 +671,7 @@ if __name__ == "__main__":
     if opt.mode == 'train':
         try:
             trainer.fit(model, data)
+            melk()
         except Exception:
             if opt.debug is False:
                 melk()

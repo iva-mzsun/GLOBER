@@ -1,6 +1,6 @@
 model:
-  base_learning_rate: 1e-4
-  target: cldm.ldmae_v3.AutoEncLDM
+  base_learning_rate: 5e-5
+  target: cldm.ldmae_v4.AutoEncLDM
   params:
     sd_lock_input: True
     sd_lock_middle: True
@@ -30,18 +30,18 @@ model:
       - output_blocks.6.
       - output_blocks.7.
 
-    scheduler_config: # 10000 warmup steps
-      target: ldm.lr_scheduler.LambdaLinearScheduler
-      params:
-        warm_up_steps: [ 1000 ] # NOTE for resuming. use 10000 if starting from scratch
-        cycle_lengths: [ 10000000000000 ] # incredibly large number to prevent corner cases
-        f_start: [ 1.e-6 ]
-        f_max: [ 1. ]
-        f_min: [ 1. ]
+#    scheduler_config: # 10000 warmup steps
+#      target: ldm.lr_scheduler.LambdaLinearScheduler
+#      params:
+#        warm_up_steps: [ 1000 ] # NOTE for resuming. use 10000 if starting from scratch
+#        cycle_lengths: [ 10000000000000 ] # incredibly large number to prevent corner cases
+#        f_start: [ 1.e-6 ]
+#        f_max: [ 1. ]
+#        f_min: [ 1. ]
 
     videocontent_key: "full_frame"
     videoenc_config:
-      target: cldm.ldmae_v3.VideoContentEnc
+      target: cldm.ldmae_v4.VideoContentEnc
       params:
         dims: 3
         image_size: 32
@@ -56,8 +56,25 @@ model:
         use_checkpoint: True
         legacy: False
 
+    generator_loss_weight: 0.1
+    adversarial_loss: hinge
+    xrec_label_real: False
+    seq_discriminator_config:
+      target: cldm.ldmae_v4.SeqDiscriminator
+      params:
+        dims: 3
+        image_size: 32
+        in_channels: 4
+        model_channels: 128
+        num_res_blocks: 1
+        attention_resolutions: [ 2, 4, 8, 16 ]
+        channel_mult: [ 1, 1, 2, 2, 2 ]
+        num_head_channels: 32
+        use_checkpoint: True
+        legacy: False
+
     unet_config:
-      target: cldm.ldmae_v3.AEUnetModel
+      target: cldm.ldmae_v4.AEUnetModel
       params:
         image_size: 32 # unused
         in_channels: 4
@@ -73,7 +90,7 @@ model:
         use_checkpoint: True
         legacy: False
 
-    first_stage_key: "tar_frame" # current video frame
+    first_stage_key: "tar_frames" # current video frames
     first_stage_config:
       target: ldm.models.autoencoder.AutoencoderKL
       params:
@@ -104,48 +121,46 @@ data:
   target: main.DataModuleFromConfig
   params:
     wrap: False
-#    batch_size: 2 # For debug
-    batch_size: 80
+#    batch_size: 4 # For debug
+    batch_size: 28
     num_workers: 4
     train:
-      target: cldm.data.custom.VideoFolderDataset_AE
+      target: cldm.data.custom.VideoFolderDataset_AEwT
       params:
         size: 256
         flip_p: 0.5
-        start_zero_p: 0.1
+        num_frames: 2
 #        max_data_num: 96 # For debug
         content_frame_idx:
           - 0
+          - 5
           - 10
-          - 20
-          - 31
-        full_video_length: 32
-        root: /raid/72_datasets/ucf101/trainval_32fps
-#        root: /home/zhongguokexueyuanzidonghuayanjiusuo/datasets/UCF-101/frames_fps20
+          - 15
+        full_video_length: 16
+        root: /home/zhongguokexueyuanzidonghuayanjiusuo/datasets/UCF-101/frames_fps20
     validation:
-      target: cldm.data.custom.VideoFolderDataset_AE
+      target: cldm.data.custom.VideoFolderDataset_AEwT
       params:
         size: 256
         flip_p: 0.5
-        start_zero_p: 0.1
+        num_frames: 2
         max_data_num: 2048
 #        max_data_num: 96 # for debug
         content_frame_idx:
           - 0
+          - 5
           - 10
-          - 20
-          - 31
-        full_video_length: 32
-        root: /raid/72_datasets/ucf101/trainval_32fps
-#        root: /home/zhongguokexueyuanzidonghuayanjiusuo/datasets/UCF-101/frames_fps20
+          - 15
+        full_video_length: 16
+        root: /home/zhongguokexueyuanzidonghuayanjiusuo/datasets/UCF-101/frames_fps20
 
 lightning:
   trainer:
     ckpt_load_strict: False
     accelerator: 'gpu'
-    devices: 8
+    devices: 4
     log_gpu_memory: all
-    max_epochs: 5000
+    max_epochs: 500
     precision: 16
     auto_select_gpus: False
     strategy:
@@ -165,11 +180,24 @@ lightning:
     logger: True
     default_root_dir: "experiments/"
 
-  callbacks:
-    image_logger:
-      target: main.ImageLogger
-      params:
-        log_imgs: True
+#  callbacks:
+#    image_logger:
+#      target: main.ImageLogger
+#      params:
+#        batch_frequency: 200
+#        max_images: 4
+#        increase_log_steps: False
+#        log_first_step: True
+#        log_all_val: True
+#        log_images_kwargs:
+#          ddim_steps: 200
+#          use_ema_scope: True
+#          inpaint: False
+#          plot_progressive_rows: False
+#          plot_diffusion_rows: False
+#          N: 4
+#          unconditional_guidance_scale: 3.0
+#          unconditional_guidance_label: [ "" ]
 
   logger:
     wandb:
