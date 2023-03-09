@@ -772,7 +772,7 @@ class LatentDiffusion(DDPM):
         return fold, unfold, normalization, weighting
 
     @torch.no_grad()
-    def get_input(self, batch, k, bs=None, return_first_stage_outputs=False, force_c_encode=False,
+    def get_input(self, batch, k, repeat_c_by_T=True, bs=None, return_first_stage_outputs=False, force_c_encode=False,
                   cond_key=None, return_original_cond=False, return_x=False):
         x = super().get_input(batch, k, bs)
         x = x.to(self.device)
@@ -816,8 +816,9 @@ class LatentDiffusion(DDPM):
                 c = {'pos_x': pos_x, 'pos_y': pos_y}
 
         T = z.shape[0] // c.shape[0]
-        c = repeat(c, 'b l c -> b t l c', t=T)
-        c = rearrange(c, 'b t l c -> (b t) l c')
+        if repeat_c_by_T:
+            c = repeat(c, 'b l c -> b t l c', t=T)
+            c = rearrange(c, 'b t l c -> (b t) l c')
         out = [z, c]
         if return_first_stage_outputs:
             xrec = self.decode_first_stage(z)

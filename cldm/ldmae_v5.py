@@ -21,7 +21,7 @@ from cldm.utils.blocks import ResBlockwoEmb, TemporalAttentionBlock, SpatialAtte
 
 from ipdb import set_trace as st
 
-class SeqDiscriminator(nn.Module):
+class TimeDiscriminator(nn.Module):
     def __init__(
         self,
         image_size,
@@ -155,6 +155,150 @@ class SeqDiscriminator(nn.Module):
         '''
         h = x.type(self.dtype)
         h = h + self.frame_embed
+        for module in self.input_blocks:
+            h = module(h)
+        logit = self.out(h).squeeze(1)
+        return logit # B
+
+class IdentityDiscriminator(nn.Module):
+    def __init__(
+        self,
+        image_size,
+        in_channels,
+        model_channels,
+        num_res_blocks,
+        attention_resolutions,
+        dropout=0,
+        channel_mult=(1, 2, 4, 8),
+        conv_resample=True,
+        dims=3,
+        use_checkpoint=False,
+        use_fp16=False,
+        num_heads=-1,
+        num_head_channels=-1,
+        num_heads_upsample=-1,
+        use_scale_shift_norm=False,
+        resblock_updown=False,
+        use_new_attention_order=False,
+        legacy=True,
+        temporal_embeddings=False
+    ):
+        super().__init__()
+        if num_heads_upsample == -1:
+            num_heads_upsample = num_heads
+
+        if num_heads == -1:
+            assert num_head_channels != -1, 'Either num_heads or num_head_channels has to be set'
+
+        if num_head_channels == -1:
+            assert num_heads != -1, 'Either num_heads or num_head_channels has to be set'
+
+        self.dims = dims
+        self.image_size = image_size
+        self.in_channels = in_channels
+        self.model_channels = model_channels
+        if isinstance(num_res_blocks, int):
+            self.num_res_blocks = len(channel_mult) * [num_res_blocks]
+        else:
+            if len(num_res_blocks) != len(channel_mult):
+                raise ValueError("provide num_res_blocks either as an int (globally constant) or "
+                                 "as a list/tuple (per-level) with the same length as channel_mult")
+            self.num_res_blocks = num_res_blocks
+
+        self.attention_resolutions = attention_resolutions
+        self.dropout = dropout
+        self.channel_mult = channel_mult
+        self.conv_resample = conv_resample
+        self.use_checkpoint = use_checkpoint
+        self.dtype = th.float16 if use_fp16 else th.float32
+        self.num_heads = num_heads
+        self.num_head_channels = num_head_channels
+        self.num_heads_upsample = num_heads_upsample
+
+        # temporal embeddings
+        # create learnable embeddings to distinguish pre/cur video frame
+        self.temporal_embed = temporal_embeddings
+        if temporal_embeddings:
+            shape = (1, in_channels, 2, image_size, image_size)
+            self.frame_embed = nn.Parameter(torch.randn(shape), requires_grad=True)
+
+        # create input blocks
+        self.input_blocks = nn.ModuleList([
+             conv_nd(dims, in_channels, model_channels, 3, padding=1)
+        ])
+        input_block_chans = [model_channels]
+        ds, ch = 1, model_channels
+        for level, mult in enumerate(channel_mult):
+            for nr in range(self.num_res_blocks[level]):
+                layers = [
+                    ResBlockwoEmb(
+                        ch,
+                        dropout,
+                        out_channels=mult * model_channels,
+                        use_checkpoint=use_checkpoint,
+                        use_scale_shift_norm=use_scale_shift_norm,
+                    )
+                ]
+                ch = mult * model_channels
+                if ds in attention_resolutions:
+                    if num_head_channels == -1:
+                        dim_head = ch // num_heads
+                    else:
+                        num_heads = ch // num_head_channels
+                        dim_head = num_head_channels
+                    if legacy:
+                        dim_head = num_head_channels
+
+                    layers.append(
+                        SpatioTemporalAttentionBlock(
+                            ch,
+                            use_checkpoint=use_checkpoint,
+                            num_heads=num_heads,
+                            num_head_channels=dim_head,
+                            use_new_attention_order=use_new_attention_order,
+                        )
+                    )
+                self.input_blocks.append(nn.Sequential(*layers))
+                input_block_chans.append(ch)
+            if level != len(channel_mult) - 1:
+                out_ch = ch
+                self.input_blocks.append(
+                    nn.Sequential(
+                        ResBlockwoEmb(
+                            ch,
+                            dropout,
+                            out_channels=out_ch,
+                            use_checkpoint=use_checkpoint,
+                            use_scale_shift_norm=use_scale_shift_norm,
+                            down=True,
+                        )
+                        if resblock_updown
+                        else Downsample(
+                            ch, conv_resample, out_channels=out_ch, dims=dims,
+                        )
+                    )
+                )
+                ch = out_ch
+                input_block_chans.append(ch)
+                ds *= 2
+
+        # obtain video content feature
+        self.out = nn.Sequential(
+            conv_nd(dims, ch, model_channels, 3, padding=1),
+            normalization(model_channels),
+            nn.SiLU(),
+            nn.AdaptiveAvgPool3d((1, 1, 1)),
+            nn.Flatten(), # B, C
+            nn.Linear(model_channels, 1)
+        )
+
+    def forward(self, x, **kwargs):
+        '''
+        x: [(b t), c, 2, h, w]
+        '''
+        h = x.type(self.dtype)
+        if self.temporal_embed:
+            h = h + self.frame_embed
         for module in self.input_blocks:
             h = module(h)
         logit = self.out(h).squeeze(1)
@@ -368,6 +512,11 @@ class VideoContentEnc(nn.Module):
             vc = self.out_vc(h) # B, C, 1, H, W
             vc = vc.squeeze(2) # B, C, H, W
 
+        # resize vc
+        B, T = index.shape
+        vc = repeat(vc, 'b c h w -> b c t h w', t=T)
+        vc = rearrange(vc, 'b c t h w -> (b t) c h w')
+
         # obtain index embedding
         index = rearrange(index, 'b t -> (b t)')
         index_emb = timestep_embedding(index, self.model_channels)
@@ -404,13 +553,14 @@ class AEUnetModel(UNetModel):
 class AutoEncLDM(LatentDiffusion):
 
     def __init__(self,
-                 generator_loss_weight,
-                 seq_discriminator_config,
                  adversarial_loss,
+                 generator_loss_weight,
+                 time_discriminator_config,
+                 identity_discriminator_config,
                  videoenc_config, videocontent_key,
                  frame_index_key, optimize_params_key,
                  sd_lock_output, sd_lock_input, sd_lock_middle,
-                 xrec_label_real=True,
+                 identity_disc_wtemporal=False,
                  optimizer="adam", *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.optimizer = optimizer
@@ -418,7 +568,6 @@ class AutoEncLDM(LatentDiffusion):
         self.sd_lock_middle = sd_lock_middle
         self.sd_lock_output = sd_lock_output
         self.optimize_params_key = optimize_params_key
-        self.xrec_label_real = xrec_label_real
         # obtain video content
         self.videocontent_key = videocontent_key
         videoenc_config['params']['sdinput_block_ds'] = self.model.diffusion_model.input_block_ds
@@ -427,7 +576,17 @@ class AutoEncLDM(LatentDiffusion):
         # obtain target video frame indexes
         self.frame_index_key = frame_index_key
         # obtain discriminator
-        self.seq_discriminator = instantiate_from_config(seq_discriminator_config)
+        self.time_discriminator = None if not time_discriminator_config else \
+            instantiate_from_config(time_discriminator_config)
+        self.identity_discriminator = None if not identity_discriminator_config else \
+            instantiate_from_config(identity_discriminator_config)
+        if identity_disc_wtemporal is True:
+            print(f"!!! Adopt obtain_identity_disc_label_wtemp")
+            self.obtain_identity_disc_label = self.obtain_identity_disc_label_wtemp
+        else:
+            print(f"!!! Adopt obtain_identity_disc_label_wotemp")
+            self.obtain_identity_disc_label = self.obtain_identity_disc_label_wotemp
+        # generator loss
         self.generator_loss_weight = generator_loss_weight
         if adversarial_loss == "hinge":
             from cldm.utils.gan_loss import hinge_d_loss
@@ -435,7 +594,7 @@ class AutoEncLDM(LatentDiffusion):
         else:
             raise NotImplementedError
 
-    def obtain_disc_label(self, batch, x, real):
+    def obtain_time_disc_label(self, batch, x, real):
         # label: 0 - fake, 1 - real
         B, T = batch[self.frame_index_key].shape
 
@@ -457,6 +616,84 @@ class AutoEncLDM(LatentDiffusion):
         outx = torch.cat([prex, curx], dim=2) # (b t) c 2 h w
         return outx, label
 
+    def obtain_identity_disc_label_wtemp(self, batch, realx, fakex, optimizer_idx):
+        '''
+        realx/fakex: [B * T, C, H, W]
+        '''
+        B, T = batch[self.frame_index_key].shape
+        realx = rearrange(realx, '(b t) c h w -> b c t h w', b=B, t=T)
+        fakex = rearrange(fakex, '(b t) c h w -> b c t h w', b=B, t=T)
+        real0 = realx[:, :, :1, :, :] # B, C, 1, H, W
+        fake0 = fakex[:, :, :1, :, :]  # B, C, 1, H, W
+        real1 = realx[:, :, -1:, :, :]  # B, C, 1, H, W
+        fake1 = fakex[:, :, -1:, :, :]  # B, C, 1, H, W
+
+        samples, labels = [], []
+        if optimizer_idx == 0:  # train generator
+            # True samples:
+            samples.append(torch.cat([real0, fake1], dim=2))
+            labels.append(torch.ones(B).to(self.dtype))
+            samples.append(torch.cat([fake0, real1], dim=2))
+            labels.append(torch.ones(B).to(self.dtype))
+            samples.append(torch.cat([fake0, fake1], dim=2))
+            labels.append(torch.ones(B).to(self.dtype))
+        elif optimizer_idx == 1: # train discriminator
+            # TRUE samples:
+            samples.append(torch.cat([real0, real1], dim=2))
+            labels.append(torch.ones(B).to(self.dtype))
+            # False samples:
+            samples.append(torch.cat([real0, fake1], dim=2))
+            labels.append(torch.zeros(B).to(self.dtype))
+            samples.append(torch.cat([fake0, real1], dim=2))
+            labels.append(torch.zeros(B).to(self.dtype))
+            samples.append(torch.cat([fake0, fake1], dim=2))
+            labels.append(torch.zeros(B).to(self.dtype))
+            samples.append(torch.cat([real1, real0], dim=2))
+            labels.append(torch.zeros(B).to(self.dtype))
+            samples.append(torch.cat([fake1, fake0], dim=2))
+            labels.append(torch.zeros(B).to(self.dtype))
+        # concate all samples
+        samples = torch.cat(samples, dim=0) # (b * 3 or 4) c 2 h w
+        labels = torch.cat(labels, dim=0).to(samples.device) # (b * 3 or 4)
+        return samples, labels
+
+    def obtain_identity_disc_label_wotemp(self, batch, realx, fakex, optimizer_idx):
+        '''
+        realx/fakex: [B * T, C, H, W]
+        '''
+        B, T = batch[self.frame_index_key].shape
+        realx = rearrange(realx, '(b t) c h w -> b c t h w', b=B, t=T)
+        fakex = rearrange(fakex, '(b t) c h w -> b c t h w', b=B, t=T)
+        real0 = realx[:, :, :1, :, :] # B, C, 1, H, W
+        fake0 = fakex[:, :, :1, :, :]  # B, C, 1, H, W
+        real1 = realx[:, :, -1:, :, :]  # B, C, 1, H, W
+        fake1 = fakex[:, :, -1:, :, :]  # B, C, 1, H, W
+
+        samples, labels = [], []
+        if optimizer_idx == 0:  # train generator
+            # True samples:
+            samples.append(torch.cat([real0, fake1], dim=2))
+            labels.append(torch.ones(B).to(self.dtype))
+            samples.append(torch.cat([fake0, real1], dim=2))
+            labels.append(torch.ones(B).to(self.dtype))
+            samples.append(torch.cat([fake0, fake1], dim=2))
+            labels.append(torch.ones(B).to(self.dtype))
+        elif optimizer_idx == 1: # train discriminator
+            # TRUE samples:
+            samples.append(torch.cat([real0, real1], dim=2))
+            labels.append(torch.ones(B).to(self.dtype))
+            # False samples:
+            samples.append(torch.cat([real0, fake1], dim=2))
+            labels.append(torch.zeros(B).to(self.dtype))
+            samples.append(torch.cat([fake0, real1], dim=2))
+            labels.append(torch.zeros(B).to(self.dtype))
+            samples.append(torch.cat([fake0, fake1], dim=2))
+            labels.append(torch.zeros(B).to(self.dtype))
+        # concate all samples
+        samples = torch.cat(samples, dim=0) # (b * 3 or 4) c 2 h w
+        labels = torch.cat(labels, dim=0).to(samples.device) # (b * 3 or 4)
+        return samples, labels
+
     def training_step(self, batch, batch_idx, optimizer_idx):
         for k in self.ucg_training:
             p = self.ucg_training[k]["p"]
@@ -468,38 +705,62 @@ class AutoEncLDM(LatentDiffusion):
                     batch[k][i] = val
 
         if optimizer_idx == 0:
-            loss, loss_dict, _, x_recon = self.shared_step(batch, returnx=True) # x: [(b t) c h w]
+            loss, loss_dict, x_start, x_recon = self.shared_step(batch, returnx=True) # x: [(b t) c h w]
             # log lr and custom losses
             lr = self.optimizers()[optimizer_idx].param_groups[0]['lr']
             self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
             self.log_dict(loss_dict, prog_bar=True, logger=True, on_step=True, on_epoch=True)
             self.log("global_step", self.global_step, prog_bar=True, logger=True, on_step=True, on_epoch=False)
-            # log discriminator loss
-            cat_x, label = self.obtain_disc_label(batch, x_recon, real=True)
-            for p in self.seq_discriminator.parameters():
-                p.requires_grad = True
-            logit = self.seq_discriminator(cat_x)
-            g_loss = self.adversarial_loss(logit, label) # reverse label
+            g_loss_time, g_loss_iden = torch.zeros_like(loss), torch.zeros_like(loss)
+            if self.time_discriminator is not None:
+                # allow grad
+                for p in self.time_discriminator.parameters():
+                    p.requires_grad = True
+                # obtain time disc loss
+                x_time, label_time = self.obtain_time_disc_label(batch, x_recon, real=True)
+                logit_time = self.time_discriminator(x_time)
+                g_loss_time = self.adversarial_loss(logit_time, label_time)  # reverse label
+                self.log("train/g_loss_time", g_loss_time, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            elif self.identity_discriminator is not None:
+                for p in self.identity_discriminator.parameters():
+                    p.requires_grad = True
+                # obtain identity disc loss
+                x_iden, label_iden = self.obtain_identity_disc_label(batch, x_start, x_recon, 0)
+                logit_iden = self.identity_discriminator(x_iden)
+                g_loss_iden = self.adversarial_loss(logit_iden, label_iden)
+                self.log("train/g_loss_identity", g_loss_iden, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            # g_loss
+            g_loss = g_loss_time + g_loss_iden
             self.log("train/g_loss", g_loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
             return loss + g_loss * self.generator_loss_weight
 
         if optimizer_idx == 1:
             with torch.no_grad():
-                _, _, x_start, x_recon = self.shared_step(batch, returnx=True)  # x: [(b t) c h w]
+                loss, _, x_start, x_recon = self.shared_step(batch, returnx=True)  # x: [(b t) c h w]
                 x_start, x_recon = x_start.detach(), x_recon.detach()
-            cat_x_start, label_start = self.obtain_disc_label(batch, x_start, real=True)
-            cat_x_recon, label_recon = self.obtain_disc_label(batch, x_recon,
-                                                              real=self.xrec_label_real)
-            logit_start = self.seq_discriminator(cat_x_start)
-            logit_recon = self.seq_discriminator(cat_x_recon)
-            d_loss_start = self.adversarial_loss(logit_start, label_start)
-            d_loss_recon = self.adversarial_loss(logit_recon, label_recon)
-            d_loss = (d_loss_start + d_loss_recon) / 2
+            d_loss_time, d_loss_iden = torch.zeros_like(loss), torch.zeros_like(loss)
+            if self.time_discriminator is not None:
+                # obtain time disc loss
+                cat_x_start, label_start = self.obtain_time_disc_label(batch, x_start, real=True)
+                cat_x_recon, label_recon = self.obtain_time_disc_label(batch, x_recon, real=False)
+                logit_start = self.time_discriminator(cat_x_start)
+                logit_recon = self.time_discriminator(cat_x_recon)
+                d_loss_start = self.adversarial_loss(logit_start, label_start)
+                d_loss_recon = self.adversarial_loss(logit_recon, label_recon)
+                d_loss_time = (d_loss_start + d_loss_recon) / 2
+            if self.identity_discriminator is not None:
+                # obtain identity disc loss
+                x_iden, label_iden = self.obtain_identity_disc_label(batch, x_start, x_recon, 1)
+                logit_iden = self.identity_discriminator(x_iden)
+                d_loss_iden = self.adversarial_loss(logit_iden, label_iden)
+            # d_loss
+            d_loss = d_loss_time + d_loss_iden
+            # log
             lr = self.optimizers()[optimizer_idx].param_groups[0]['lr']
             self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
             self.log("train/d_loss", d_loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            self.log("train/d_loss_start", d_loss_start, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            self.log("train/d_loss_recon", d_loss_recon, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            self.log("train/d_loss_time", d_loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            self.log("train/d_loss_iden", d_loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
             return d_loss
 
     def p_losses(self, x_start, cond, t, returnx=False, noise=None):
@@ -579,7 +840,6 @@ class AutoEncLDM(LatentDiffusion):
         cond_vc = torch.cat(cond['c_video'], 2) # b, c, t, h, w
         cond_index = cond['c_index'][0] # b
         # cond_index = torch.cat(cond['c_index'], 1) # b, 1
-
         vc_feats = self.videocontent_enc(x=cond_vc, index=cond_index)
         eps = diffusion_model(x=x_noisy, vc_feats=vc_feats, timesteps=t, context=cond_txt)
         return eps
@@ -712,7 +972,12 @@ class AutoEncLDM(LatentDiffusion):
                 g_params.append(p)
 
         # == parameters of discriminator ==
-        d_params = list(self.seq_discriminator.parameters())
+        d_params = []
+        if self.time_discriminator is not None:
+            d_params += list(self.time_discriminator.parameters())
+        if self.identity_discriminator is not None:
+            d_params += list(self.identity_discriminator.parameters())
+        assert len(d_params) != 0
 
         # == count total params to optimize ==
         optimize_params = 0
@@ -727,22 +992,6 @@ class AutoEncLDM(LatentDiffusion):
             opt_g = torch.optim.AdamW(g_params, lr=lr)
             opt_d = torch.optim.AdamW(d_params, lr=lr)
 
-        # if self.use_scheduler:
-        #     from torch.optim.lr_scheduler import LambdaLR
-        #     assert 'target' in self.scheduler_config
-        #     scheduler = instantiate_from_config(self.scheduler_config)
-        #     print("Setting up LambdaLR scheduler...")
-        #     scheduler_g = [{
-        #             'scheduler': LambdaLR(opt_g, lr_lambda=scheduler.schedule),
-        #             'interval': 'step',
-        #             'frequency': 1
-        #         }]
-        #     scheduler_d = [{
-        #         'scheduler': LambdaLR(opt_d, lr_lambda=scheduler.schedule),
-        #         'interval': 'step',
-        #         'frequency': 1
-        #     }]
-        #     return [opt_g, opt_d], [scheduler_g, scheduler_d]
         return [opt_g, opt_d], []
 
     def low_vram_shift(self, is_diffusing):

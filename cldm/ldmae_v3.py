@@ -211,7 +211,6 @@ class VideoContentEnc(nn.Module):
         x: [b, c, t, h, w]
         ind: [b]
         '''
-
         # obtain vc
         if self.learnable_content:
             B, C, T, H, W = x.shape
@@ -324,13 +323,20 @@ class AutoEncLDM(LatentDiffusion):
                                      *args, **kwargs) # x: [b c h w], c: [b c]
         # encode full video frames
         vidcontent = batch[self.videocontent_key].to(self.device)
+        if self.use_fp16:
+            vidcontent = vidcontent.to(memory_format=torch.contiguous_format).half()
+        else:
+            vidcontent = vidcontent.to(memory_format=torch.contiguous_format).float()
+        T = vidcontent.shape[2]
         vidcontent = einops.rearrange(vidcontent, 'b c t h w -> (b t) c h w')
-        vidcontent = vidcontent.to(memory_format=torch.contiguous_format).float()
         vidcontent = self.encode_first_stage(vidcontent)
         vidcontent = self.get_first_stage_encoding(vidcontent).detach()
-        vidcontent = rearrange(vidcontent, '(b t) c h w -> b c t h w', b=x.shape[0])
+        vidcontent = rearrange(vidcontent, '(b t) c h w -> b c t h w', t=T)
         # obtain target frame index embedding
         frame_indexes = batch[self.frame_index_key].to(self.device)
+        if bs is not None:
+            vidcontent = vidcontent[:bs]
+            frame_indexes = frame_indexes[:bs]
         return x, dict(c_crossattn=[c], c_video=[vidcontent], c_index=[frame_indexes])
 
     def apply_model(self, x_noisy, t, cond, *args, **kwargs):
@@ -396,14 +402,15 @@ class AutoEncLDM(LatentDiffusion):
         return log
 
     @torch.no_grad()
-    def log_videos(self, batch, N=16, n_frames=16, sample=False, ddim_steps=50, ddim_eta=0.0,
-                   plot_denoise_rows=False, verbose=False, unconditional_guidance_scale=9.0, **kwargs):
+    def log_videos(self, batch, N=2, n_frames=4, sample=False, ddim_steps=50, ddim_eta=0.0,
+                   verbose=False, unconditional_guidance_scale=9.0, **kwargs):
+        B = batch[self.frame_index_key].shape[0]
+        N = min(B, N)
         # obtain inputs
         use_ddim = ddim_steps is not None
         z, cond = self.get_input(batch, self.first_stage_key, bs=N)
-        td = tqdm(range(n_frames)) if verbose else range(n_frames)
+        td = tqdm(range(n_frames))
         # obtain conditions
-        N = min(z.shape[0], N)
         vc = cond["c_video"][0][:N]
         ind = cond["c_index"][0][:N]
         c = cond["c_crossattn"][0][:N]
@@ -412,16 +419,15 @@ class AutoEncLDM(LatentDiffusion):
         log = dict()
         log["reconstruction"] = self.decode_first_stage(z[:N])
         log['full_frames'] = rearrange(batch[self.videocontent_key].to(self.device),
-                                       'b c t h w -> (b t) c h w')
-        log["conditioning"] = log_txt_as_img((512, 512), batch[self.cond_stage_key], size=16)
+                                       'b c t h w -> b c h (t w)')
         # start sampling
         if sample:
             samples = []
             for f in td:
                 ind = torch.ones_like(ind) * f / n_frames
                 new_cond["c_index"] = [ind]
-                frames, _ = self.sample_log(cond=new_cond, batch_size=N, ddim=use_ddim, verbose=verbose,
-                                            ddim_steps=ddim_steps, eta=ddim_eta)
+                frames, _ = self.sample_log(cond=new_cond, batch_size=N, ddim=use_ddim,
+                                            ddim_steps=ddim_steps, eta=ddim_eta, verbose=verbose)
                 samples.append(self.decode_first_stage(frames).unsqueeze(1))
             x_samples = torch.cat(samples, dim=1) # b, t, c, h, w
             x_samples = rearrange(x_samples, 'b t c h w -> (b t) c h w')
@@ -437,14 +443,13 @@ class AutoEncLDM(LatentDiffusion):
                 uc_cond["c_index"] = [ind]
                 new_cond["c_index"] = [ind]
                 frames_ug, _ = self.sample_log(cond=new_cond, batch_size=N, ddim=use_ddim,
-                                               ddim_steps=ddim_steps, eta=ddim_eta, verbose=False,
+                                               ddim_steps=ddim_steps, eta=ddim_eta, verbose=verbose,
                                                unconditional_conditioning=uc_cond,
                                                unconditional_guidance_scale=unconditional_guidance_scale)
                 samples_ug.append(self.decode_first_stage(frames_ug).unsqueeze(1))
             x_samples_ug = torch.cat(samples_ug, dim=1)  # b, t, c, h, w
             x_samples_ug = rearrange(x_samples_ug, 'b t c h w -> b c h (t w)')
             log[f"samples_ug_scale_{unconditional_guidance_scale:.2f}"] = x_samples_ug
-
         return log
 
     @torch.no_grad()

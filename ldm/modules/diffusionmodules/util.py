@@ -225,7 +225,8 @@ def normalization(channels):
     :param channels: number of input channels.
     :return: an nn.Module for normalization.
     """
-    return GroupNorm32(32, channels)
+    gch = min(32, channels)
+    return GroupNorm32(gch, channels)
 
 
 # PyTorch 1.7 has SiLU, but we support PyTorch 1.5.

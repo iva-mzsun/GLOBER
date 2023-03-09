@@ -168,9 +168,10 @@ def get_parser(**parser_kwargs):
     parser.add_argument("--save_mode", type=str, default="byvideo") # bybatch, byvideo, byframe
     parser.add_argument("--test_verbose", type=bool, default=False)
     parser.add_argument("--video_length", type=int, default=8)
+    parser.add_argument("--ddim_step", type=int, default=50)
     parser.add_argument("--total_sample_number", type=int, default=16)
     parser.add_argument("--unconditional_guidance_scale", type=float, default=9.0)
-
+    parser.add_argument("--dataset_root", type=str, default=None)
     return parser
 
 def nondefault_trainer_args(opt):

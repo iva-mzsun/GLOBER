@@ -1,4 +1,5 @@
 import os
+import json
 import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
@@ -119,7 +120,9 @@ class VideoFolderDataset_AE(Dataset):
         return image
 
     def update_point(self, curv):
-        if self.vidpoint[curv] + self.full_video_length >= len(self.vid2img[curv]):
+        cpoint = self.vidpoint[curv]
+        self.vidpoint[curv] = cpoint + 1
+        if cpoint + self.full_video_length >= len(self.vid2img[curv]):
             self.vidpoint[curv] = 0
 
     def __getitem__(self, idx):
@@ -158,12 +161,15 @@ class VideoFolderDataset_AE(Dataset):
         })
 
 class VideoFolderDataset_AEwT(Dataset):
-    def __init__(self, root, num_frames,
+    def __init__(self, root, num_frames, allow_flip=True, allow_point=True, sort_index=False,
                  content_frame_idx=(0, 10, 20, 31), full_video_length=32,
                  flip_p=0.5, size=None, max_data_num=None):
         self.size = size
         self.flip_prob = flip_p
+        self.sort_index = sort_index
         self.num_frames = num_frames
+        self.allow_filp = allow_flip
+        self.allow_point = allow_point
         self.content_frame_idx = content_frame_idx
         self.full_video_length = full_video_length
         self.interpolation = Image.BICUBIC
@@ -201,7 +207,11 @@ class VideoFolderDataset_AEwT(Dataset):
         return image
 
     def update_point(self, curv):
-        if self.vidpoint[curv] + self.full_video_length >= len(self.vid2img[curv]):
+        if self.allow_point is False:
+            return
+        cpoint = self.vidpoint[curv]
+        self.vidpoint[curv] = cpoint + 1
+        if cpoint + self.full_video_length >= len(self.vid2img[curv]):
             self.vidpoint[curv] = 0
 
     def __getitem__(self, idx):
@@ -209,7 +219,8 @@ class VideoFolderDataset_AEwT(Dataset):
         prompt = curv.split('_')[1]
         # determine if flip
         p = np.random.rand()
-        if_flip = p < self.flip_prob
+        if_flip = p < self.flip_prob \
+            if self.allow_filp else False
         # load video frames * point
         frames = self.vid2img[curv]
         point = self.vidpoint[curv]
@@ -219,8 +230,11 @@ class VideoFolderDataset_AEwT(Dataset):
         for i in self.content_frame_idx:
             content_frames.append(self.load_img(frames[point + i], if_flip)[:, np.newaxis, :, :])
         content_frames = np.concatenate(content_frames, axis=1)
-        # random select a target frame
+        # random select target frame indexes
         tar_indexes = np.random.randint(0, self.full_video_length, self.num_frames)
+        if self.sort_index:
+            tar_indexes = np.sort(tar_indexes)
+        # load target video frames
         tar_frames = []
         for ind in tar_indexes:
             tar_frame = self.load_img(frames[point + ind], if_flip)
@@ -228,6 +242,103 @@ class VideoFolderDataset_AEwT(Dataset):
 
         tar_indexes = tar_indexes.astype(np.float) / self.full_video_length
         # tar_indexes =  self.full_video_length
+        tar_frames = np.concatenate(tar_frames, axis=1)
+
+        return dict({
+            'txt': prompt, # str
+            'video_name': curv, # str
+            'tar_frames': tar_frames, # [c, t, h, w]
+            'full_frame': content_frames, # [c, t, h, w]
+            'frame_index': tar_indexes, # [t]
+        })
+
+class VideoFolderDataset_AEwTwIDS(Dataset):
+    def __init__(self, root, num_frames, ids_json,
+                 allow_flip=True, allow_point=True, sort_index=False,
+                 content_frame_idx=(0, 10, 20, 31), full_video_length=32,
+                 flip_p=0.5, size=None, max_data_num=None):
+        self.size = size
+        self.flip_prob = flip_p
+        self.sort_index = sort_index
+        self.num_frames = num_frames
+        self.allow_flip = allow_flip
+        self.allow_point = allow_point
+        self.content_frame_idx = content_frame_idx
+        self.full_video_length = full_video_length
+        self.interpolation = Image.BICUBIC
+        # load video ids
+        data = json.load(open(ids_json, 'r'))
+        self.videos = data.keys()
+        if max_data_num is not None:
+            from random import shuffle
+            shuffle(self.videos)
+            self.videos = self.videos[:max_data_num]
+        # obtain video frames & points
+        self.vid2img = dict({})
+        self.vidpoint = dict({})
+        for v in self.videos:
+            self.vidpoint[v] = 0
+            vpath = os.path.join(root, v)
+            frames = [os.path.join(vpath, f)
+                      for f in os.listdir(vpath)]
+            self.vid2img[v] = sorted(frames)
+
+    def __len__(self):
+        return len(self.videos)
+
+    def load_img(self, img_path, if_flip):
+        image = Image.open(img_path)
+        if not image.mode == "RGB":
+            image = image.convert("RGB")
+        image = center_crop(image)
+        if self.size is not None:
+            image = image.resize((self.size, self.size),
+                                 resample=self.interpolation)
+        if if_flip:
+            image = F.hflip(image)
+        image = np.array(image).astype(np.uint8)
+        image = image.transpose((2, 0, 1))
+        image = (image / 127.5 - 1.0).astype(np.float32)
+        return image
+
+    def update_point(self, curv):
+        cpoint = self.vidpoint[curv]
+        self.vidpoint[curv] = cpoint + 1
+        if cpoint + self.full_video_length >= len(self.vid2img[curv]):
+            self.vidpoint[curv] = 0
+
+    def __getitem__(self, idx):
+        curv = self.videos[idx]
+        prompt = curv.split('_')[1]
+        # determine if flip
+        if self.allow_flip:
+            p = np.random.rand()
+            if_flip = p < self.flip_prob
+        else:
+            if_flip = False
+        # load video frames * point
+        frames = self.vid2img[curv]
+        if self.allow_point:
+            point = self.vidpoint[curv]
+            self.update_point(curv)
+        else:
+            point = 0
+        # load video content frames
+        content_frames = []
+        for i in self.content_frame_idx:
+            content_frames.append(self.load_img(frames[point + i], if_flip)[:, np.newaxis, :, :])
+        content_frames = np.concatenate(content_frames, axis=1)
+        # random select target frame indexes
+        tar_indexes = np.random.randint(0, self.full_video_length, self.num_frames)
+        if self.sort_index:
+            tar_indexes = np.sort(tar_indexes)
+        # load target video frames
+        tar_frames = []
+        for ind in tar_indexes:
+            tar_frame = self.load_img(frames[point + ind], if_flip)
+            tar_frames.append(tar_frame[:, np.newaxis, :, :])
+
+        tar_indexes = tar_indexes.astype(np.float) / self.full_video_length
         tar_frames = np.concatenate(tar_frames, axis=1)
 
         return dict({

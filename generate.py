@@ -51,7 +51,6 @@ def get_dataloader(data_cfg, batch_size):
 
 if __name__ == "__main__":
     sys.path.append(os.getcwd())
-    now = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
 
     parser = get_parser()
     parser = Trainer.add_argparse_args(parser)
@@ -77,20 +76,9 @@ if __name__ == "__main__":
         _tmp = logdir.split("/")
         nowname = _tmp[-1]
     else:
-        if opt.name:
-            name = "_" + opt.name
-        elif opt.base:
-            rank_zero_info("Using base config {}".format(opt.base))
-            cfg_fname = os.path.split(opt.base[0])[-1]
-            cfg_name = os.path.splitext(cfg_fname)[0]
-            name = "_" + cfg_name
-        else:
-            name = ""
-        nowname = now + name
-        logdir = os.path.join(opt.logdir, nowname)
-        if opt.ckpt:
-            ckpt = opt.ckpt
-    sampledir = os.path.join(logdir, f'samples-{os.path.basename(ckpt).split(".")[0]}')
+        raise  NotImplementedError
+    sampledir = os.path.join(logdir, f'samples-{opt.save_mode}-'
+                                     f'{os.path.basename(ckpt).split(".")[0]}')
     os.makedirs(sampledir, exist_ok=True)
     seed_everything(opt.seed)
 
@@ -109,58 +97,57 @@ if __name__ == "__main__":
     lightning_config.trainer = trainer_config
 
     # model
-    use_fp16 = trainer_config.get("precision", 32) == 16
-    if use_fp16:
-        config.model["params"].update({"use_fp16": True})
-    else:
-        config.model["params"].update({"use_fp16": False})
+    config.model["params"].update({"use_fp16": False})
+    load_strict = trainer_config.get('ckpt_load_strict', True)
     model = instantiate_from_config(config.model).cpu()
-    model.load_state_dict(load_state_dict(ckpt.strip(), location='cpu'))
+    model.load_state_dict(load_state_dict(ckpt.strip(), location='cpu'), strict=load_strict)
+    print(f"Load ckpt from {ckpt} with strict {load_strict}")
     model = model.cuda()
 
     # data
     print(f"- Loading validation data...")
     bs = opt.batch_size or config.data.params.batch_size
+    if opt.dataset_root is not None:
+        config.data.params.validation.params.root = opt.dataset_root
     dataloader = get_dataloader(config.data.params.validation, bs)
 
     # start to generate
-    control_key = model.preframe_key
     verbose = opt.test_verbose
     save_mode = opt.save_mode # bybatch, byvideo, byframe
+    ddim_step = opt.ddim_step
     video_length = opt.video_length
     total_sample_number = opt.total_sample_number
     unconditional_guidance_scale = opt.unconditional_guidance_scale
-
     for batch_idx, batch in enumerate(dataloader):
-        # batch['tar_frame'] = None
-        video_frames = [batch[control_key].detach().cpu()]
-        for _ in tqdm(range(video_length), desc=f"generating {batch_idx}-th batch..."):
-            # print(f"!!!!!!!!!! {_}")
-            with torch.no_grad():
-                sample_log = model.log_images(batch, N=bs, verbose=verbose,
-                                              unconditional_guidance_scale=unconditional_guidance_scale)
-            cur_frame = sample_log[f"samples_cfg_scale_{unconditional_guidance_scale:.2f}"]
-            cur_frame = rearrange(torch.clamp(cur_frame, min=-1, max=1), 'b c h w -> b h w c')
-            batch[control_key] = cur_frame
-            video_frames.append(cur_frame.detach().cpu())
-
-        cur_video = torch.cat(video_frames, dim=2) # concate on the width [B, C, H, W*T]
+        sample_log = model.log_videos(batch, N=bs, n_frames=video_length,
+                                      verbose=verbose, sample=False, ddim_steps=ddim_step,
+                                      unconditional_guidance_scale=unconditional_guidance_scale)
+        cur_video = sample_log[f"samples_ug_scale_{unconditional_guidance_scale:.2f}"]
+        cur_video = cur_video.detach().cpu() # b c h tw
         if save_mode == "bybatch":
-            save = rearrange(cur_video, 'b h w c -> c (b h) w')
-            save = tensor2img(save)
+            save = tensor2img(rearrange(cur_video, 'b c h w -> c (b h) w'))
             save.save(os.path.join(sampledir, f"{batch_idx:04d}.jpg"))
         elif save_mode == "byvideo":
             video_names = batch['video_name']
             for b, name in enumerate(video_names):
-                save = rearrange(cur_video[b], 'h w c -> c h w')
-                save = tensor2img(save)
-                save.save(os.path.join(sampledir, # batchidx - videoname - seed
-                                       f"b{batch_idx:04d}{b:02d}-v{name}-s{opt.seed}.jpg"))
+                save = tensor2img(cur_video[b])
+                video_name = f"b{batch_idx:04d}{b:02d}-v{name}-s{opt.seed}"
+                save.save(os.path.join(sampledir, f"{video_name}.jpg"))
+        elif save_mode == "byframe":
+            video_names = batch['video_name']
+            for b, name in enumerate(video_names):
+                video_name = f"b{batch_idx:04d}{b:02d}-v{name}-s{opt.seed}"
+                save_path = os.path.join(sampledir, video_name)
+                os.makedirs(save_path, exist_ok=False) # TODO
+                sample = rearrange(cur_video[b], 'c h (t w) -> t c h w', t=video_length)
+                for t in range(video_length):
+                    frame = tensor2img(sample[t])
+                    frame.save(os.path.join(save_path, f"{t:04d}.jpg"))
         else:
             raise NotImplementedError
 
         if bs * (batch_idx + 1) >= total_sample_number:
-            final_number = max(total_sample_number, batch * (batch_idx + 1))
+            final_number = max(total_sample_number,bs * (batch_idx + 1))
             print(f"Having generated {final_number} video samples in {sampledir}!")
             exit()
 
