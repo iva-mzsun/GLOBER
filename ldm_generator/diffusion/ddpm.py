@@ -53,7 +53,7 @@ class DDPM(pl.LightningModule):
     # classic DDPM with Gaussian diffusion, in image space
     def __init__(
         self,
-        unet_config,
+        diffusion_config,
         timesteps=1000,
         beta_schedule="linear",
         loss_type="l2",
@@ -85,6 +85,8 @@ class DDPM(pl.LightningModule):
         ucg_training=None,
         reset_ema=False,
         reset_num_ema_updates=False,
+        validation_log_start_epoch=0,
+        validation_log_every_epochs=1,
     ):
         super().__init__()
         assert parameterization in ["eps", "x0", "v"], 'currently only supporting "eps" and "x0" and "v"'
@@ -96,9 +98,11 @@ class DDPM(pl.LightningModule):
         self.first_stage_key = first_stage_key
         self.image_size = image_size
         self.channels = channels
+        self.validation_log_every_epochs = validation_log_every_epochs
+        self.validation_log_start_epoch = validation_log_start_epoch
         self.use_positional_encodings = use_positional_encodings
-        self.model = DiffusionWrapper(unet_config, conditioning_key)
-        # count_params(self.model, verbose=True)
+        self.model = DiffusionWrapper(diffusion_config, conditioning_key)
+        count_params(self.model, verbose=True)
         self.use_ema = use_ema
         if self.use_ema:
             self.model_ema = LitEma(self.model)
@@ -443,7 +447,7 @@ class DDPM(pl.LightningModule):
         loss, loss_dict = self(x)
         return loss, loss_dict
 
-    def training_step(self, batch, batch_idx, optimizer_idx):
+    def training_step(self, batch, batch_idx):
         for k in self.ucg_training:
             p = self.ucg_training[k]["p"]
             val = self.ucg_training[k]["val"]
@@ -469,6 +473,7 @@ class DDPM(pl.LightningModule):
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
+        # st()
         _, loss_dict_no_ema = self.shared_step(batch)
         with self.ema_scope():
             _, loss_dict_ema = self.shared_step(batch)
@@ -476,9 +481,11 @@ class DDPM(pl.LightningModule):
         self.log_dict(loss_dict_no_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
         self.log_dict(loss_dict_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
 
-        if batch_idx == 0:
-            sample_logs = self.log_videos(batch)
-            return sample_logs
+        sample_logs = dict({})
+        if batch_idx == 0 and self.current_epoch >= self.validation_log_start_epoch:
+            if self.current_epoch % self.validation_log_every_epochs == 0:
+                sample_logs = self.log_videos(batch, verbose=False)
+        return sample_logs
 
     def on_train_batch_end(self, *args, **kwargs):
         if self.use_ema:
@@ -772,8 +779,8 @@ class LatentDiffusion(DDPM):
         return fold, unfold, normalization, weighting
 
     @torch.no_grad()
-    def get_input(self, batch, k, repeat_c_by_T=True, bs=None, return_first_stage_outputs=False, force_c_encode=False,
-                  cond_key=None, return_original_cond=False, return_x=False):
+    def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
+                  cond_key=None, return_original_cond=False, bs=None, return_x=False):
         x = super().get_input(batch, k, bs)
         x = x.to(self.device)
         encoder_posterior = self.encode_first_stage(x)
@@ -802,6 +809,8 @@ class LatentDiffusion(DDPM):
                     c = self.get_learned_conditioning(xc.to(self.device))
             else:
                 c = xc
+            if bs is not None:
+                c = c[:bs]
 
             if self.use_positional_encodings:
                 pos_x, pos_y = self.compute_latent_shifts(batch)
@@ -814,11 +823,6 @@ class LatentDiffusion(DDPM):
             if self.use_positional_encodings:
                 pos_x, pos_y = self.compute_latent_shifts(batch)
                 c = {'pos_x': pos_x, 'pos_y': pos_y}
-
-        T = z.shape[0] // c.shape[0]
-        if repeat_c_by_T:
-            c = repeat(c, 'b l c -> b t l c', t=T)
-            c = rearrange(c, 'b t l c -> (b t) l c')
         out = [z, c]
         if return_first_stage_outputs:
             xrec = self.decode_first_stage(z)
@@ -844,9 +848,9 @@ class LatentDiffusion(DDPM):
     def encode_first_stage(self, x):
         return self.first_stage_model.encode(x)
 
-    def shared_step(self, batch, *args, **kwargs):
+    def shared_step(self, batch, **kwargs):
         x, c = self.get_input(batch, self.first_stage_key)
-        loss = self(x, c, *args, **kwargs)
+        loss = self(x, c)
         return loss
 
     def forward(self, x, c, *args, **kwargs):

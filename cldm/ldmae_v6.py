@@ -13,11 +13,12 @@ from tqdm import tqdm
 from einops import rearrange, repeat
 from ldm.modules.diffusionmodules.openaimodel import UNetModel, TimestepEmbedSequential, ResBlock, \
     Downsample, normalization, ResBlock2n
-from cldm.diffusion.ddpm_v4 import LatentDiffusion
+from cldm.diffusion.ddpm_v6 import LatentDiffusion
 from ldm.util import log_txt_as_img, instantiate_from_config, default
 from ldm.models.diffusion.ddim import DDIMSampler
 from cldm.utils.blocks import ResBlockwoEmb, TemporalAttentionBlock, SpatialAttentionBlock, \
     SpatioTemporalAttentionBlock
+from ldm.modules.distributions.distributions import DiagonalGaussianDistribution
 
 from ipdb import set_trace as st
 
@@ -343,7 +344,7 @@ class VideoContentEnc(nn.Module):
         self.dims = dims
         self.image_size = image_size
         self.in_channels = in_channels
-        self.out_channels = out_channels
+        self.out_channels = out_channels * 2
         self.model_channels = model_channels
         if isinstance(num_res_blocks, int):
             self.num_res_blocks = len(channel_mult) * [num_res_blocks]
@@ -468,18 +469,18 @@ class VideoContentEnc(nn.Module):
             curds, n = ds, 0
             tards = sdinput_block_ds[i]
             if tards == ds:
-                layers = [ResBlock(self.out_channels, index_embed_dim, dropout, ch)]
+                layers = [ResBlock(out_channels, index_embed_dim, dropout, ch)]
             elif ds < tards:
                 while curds < tards:
                     n += 1
                     curds *= 2
-                layers = [ResBlock2n(self.out_channels, index_embed_dim,
+                layers = [ResBlock2n(out_channels, index_embed_dim,
                                      dropout, ch, down=True, sample_num=n)]
             else:
                 while curds > tards:
                     n += 1
                     curds /= 2
-                layers = [ResBlock2n(self.out_channels, index_embed_dim,
+                layers = [ResBlock2n(out_channels, index_embed_dim,
                                      dropout, ch, up=True, sample_num=n)]
             layers.append(self.make_zero_conv(ch, dims=2))
             self.output_blocks.append(TimestepEmbedSequential(*layers))
@@ -491,8 +492,7 @@ class VideoContentEnc(nn.Module):
         dims = dims or self.dims
         return nn.Sequential(zero_module(conv_nd(dims, channels, channels, 1, padding=0)))
 
-    def get_latents(self, x):
-        # obtain vc
+    def encode(self, x):
         if self.learnable_content:
             B, C, T, H, W = x.shape
             vc = repeat(self.video_content, 'c h w -> b c t h w', b=B, t=1)
@@ -500,16 +500,16 @@ class VideoContentEnc(nn.Module):
         h = x.type(self.dtype)
         for module in self.input_blocks:
             h = module(h)
-
         if self.learnable_content:
             h = self.out_vc(h)
-            vc = h[:, :, 0, :, :]  # B, C, H, W
+            vc_moments = h[:, :, 0, :, :]  # B, C, H, W
         else:
-            vc = self.out_vc(h)  # B, C, 1, H, W
-            vc = vc.squeeze(2)  # B, C, H, W
-        return vc # [B, C, H, W]
+            vc_moments = self.out_vc(h)  # B, C, 1, H, W
+            vc_moments = vc_moments.squeeze(2)  # B, C, H, W
+        vc_posterior = DiagonalGaussianDistribution(vc_moments)
+        return vc_posterior # [B, C * 2, H, W]
 
-    def get_feats(self, vc, index):
+    def decode(self, vc, index):
         """
             vc: B, C, H, W
             index: B, T
@@ -529,43 +529,18 @@ class VideoContentEnc(nn.Module):
             vc_feats.append(vc_feat)
         return vc_feats
 
-    def forward(self, x, index, **kwargs):
+    def forward(self, x, index, sample_posterior=False, **kwargs):
         '''
             x: [b, c, t, h, w]
             ind: [b, t]
         '''
-        # obtain vc
-        # == encode ==
-        if self.learnable_content:
-            B, C, T, H, W = x.shape
-            vc = repeat(self.video_content, 'c h w -> b c t h w', b=B, t=1)
-            x = torch.cat([vc, x], dim=2)
-        h = x.type(self.dtype)
-        for module in self.input_blocks:
-            h = module(h)
-
-        if self.learnable_content:
-            h = self.out_vc(h)
-            vc = h[:, :, 0, :, :] # B, C, H, W
+        vc_posterior = self.encode(x)
+        if sample_posterior:
+            vc = vc_posterior.sample()
         else:
-            vc = self.out_vc(h) # B, C, 1, H, W
-            vc = vc.squeeze(2) # B, C, H, W
-
-        # resize vc
-        B, T = index.shape
-        vc = repeat(vc, 'b c h w -> b c t h w', t=T)
-        vc = rearrange(vc, 'b c t h w -> (b t) c h w')
-
-        # obtain index embedding
-        index = rearrange(index, 'b t -> (b t)')
-        index_emb = timestep_embedding(index, self.model_channels)
-        index_emb = self.index_embed(index_emb)
-        # obtain insert feat
-        vc_feats = []
-        for module in self.output_blocks:
-            vc_feat = module(vc, index_emb)
-            vc_feats.append(vc_feat)
-        return vc_feats
+            vc = vc_posterior.mode()
+        vc_feats = self.decode(vc, index)
+        return vc_feats, vc_posterior
 
 class AEUnetModel(UNetModel):
     def forward(self, x, timesteps=None, context=None, vc_feats=None, **kwargs):
@@ -591,6 +566,7 @@ class AEUnetModel(UNetModel):
 class AutoEncLDM(LatentDiffusion):
 
     def __init__(self,
+                 kl_loss_weight,
                  adversarial_loss,
                  generator_loss_weight,
                  time_discriminator_config,
@@ -606,6 +582,7 @@ class AutoEncLDM(LatentDiffusion):
         self.sd_lock_middle = sd_lock_middle
         self.sd_lock_output = sd_lock_output
         self.sd_lock_output = sd_lock_output
+        self.kl_loss_weight = kl_loss_weight
         self.optimize_params_key = optimize_params_key
         # obtain video content
         self.videocontent_key = videocontent_key
@@ -744,7 +721,8 @@ class AutoEncLDM(LatentDiffusion):
                     batch[k][i] = val
 
         if optimizer_idx == 0:
-            loss, loss_dict, x_start, x_recon = self.shared_step(batch, returnx=True) # x: [(b t) c h w]
+            loss, loss_dict, x_start, x_recon = self.shared_step(batch, returnx=True,
+                                                                 sample_posterior=True) # x: [(b t) c h w]
             # log lr and custom losses
             lr = self.optimizers()[optimizer_idx].param_groups[0]['lr']
             self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
@@ -775,7 +753,8 @@ class AutoEncLDM(LatentDiffusion):
 
         if optimizer_idx == 1:
             with torch.no_grad():
-                loss, _, x_start, x_recon = self.shared_step(batch, returnx=True)  # x: [(b t) c h w]
+                loss, _, x_start, x_recon = self.shared_step(batch, returnx=True,
+                                                             sample_posterior=True)  # x: [(b t) c h w]
                 x_start, x_recon = x_start.detach(), x_recon.detach()
             d_loss_time, d_loss_iden = torch.zeros_like(loss), torch.zeros_like(loss)
             if self.time_discriminator is not None:
@@ -802,13 +781,16 @@ class AutoEncLDM(LatentDiffusion):
             self.log("train/d_loss_iden", d_loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
             return d_loss
 
-    def p_losses(self, x_start, cond, t, returnx=False, noise=None):
-        noise = default(noise, lambda: torch.randn_like(x_start))
-        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-        model_output = self.apply_model(x_noisy, t, cond)
-
+    def p_losses(self, x_start, cond, t, returnx=False, noise=None, sample_posterior=False):
         loss_dict = {}
         prefix = 'train' if self.training else 'val'
+
+        noise = default(noise, lambda: torch.randn_like(x_start))
+        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+        model_output, vc_posterior = self.apply_model(x_noisy, t, cond, return_posterior=True,
+                                                      sample_posterior=sample_posterior)
+        loss_kl = vc_posterior.kl().mean()
+        loss_dict.update({f'{prefix}/loss_kl': loss_kl})
 
         if self.parameterization == "x0":
             target = x_start
@@ -829,8 +811,7 @@ class AutoEncLDM(LatentDiffusion):
             loss_dict.update({f'{prefix}/loss_gamma': loss.mean()})
             loss_dict.update({'logvar': self.logvar.data.mean()})
 
-        loss = self.l_simple_weight * loss.mean()
-
+        loss = self.l_simple_weight * loss.mean() + loss_kl * self.kl_loss_weight
         loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3))
         loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
         loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
@@ -872,15 +853,19 @@ class AutoEncLDM(LatentDiffusion):
             frame_indexes = frame_indexes[:bs]
         return x, dict(c_crossattn=[c], c_video=[vidcontent], c_index=[frame_indexes])
 
-    def apply_model(self, x_noisy, t, cond, *args, **kwargs):
+    def apply_model(self, x_noisy, t, cond, return_posterior=False,
+                    sample_posterior=False, *args, **kwargs):
         assert isinstance(cond, dict)
         diffusion_model = self.model.diffusion_model
         cond_txt = torch.cat(cond['c_crossattn'], 1) # b, l, c
         cond_vc = torch.cat(cond['c_video'], 2) # b, c, t, h, w
-        cond_index = cond['c_index'][0] # b, 1
+        cond_index = cond['c_index'][0] # b, t
         # cond_index = torch.cat(cond['c_index'], 1) # b, 1
-        vc_feats = self.videocontent_enc(x=cond_vc, index=cond_index)
+        vc_feats, vc_posterior = self.videocontent_enc(x=cond_vc, index=cond_index,
+                                                       sample_posterior=sample_posterior)
         eps = diffusion_model(x=x_noisy, vc_feats=vc_feats, timesteps=t, context=cond_txt)
+        if return_posterior:
+            return eps, vc_posterior
         return eps
 
     @torch.no_grad()
@@ -906,7 +891,6 @@ class AutoEncLDM(LatentDiffusion):
                                        'b c t h w -> (b t) c h w')
         log["conditioning"] = log_txt_as_img((512, 512), batch[self.cond_stage_key], size=16)
         # start sampling
-
         if sample:
             # get denoise row
             samples, z_denoise_row = self.sample_log(cond=new_cond,
@@ -957,7 +941,8 @@ class AutoEncLDM(LatentDiffusion):
         log['full_frames'] = rearrange(batch[self.videocontent_key].to(self.device),
                                        'b c t h w -> b c h (t w)')
         # start sampling
-        if sample:
+        assert unconditional_guidance_scale >= 0.0
+        if sample or unconditional_guidance_scale == 0.0:
             samples = []
             for f in td:
                 ind = torch.ones_like(ind) * f / n_frames
@@ -969,7 +954,7 @@ class AutoEncLDM(LatentDiffusion):
             x_samples = rearrange(x_samples, 'b t c h w -> (b t) c h w')
             log["samples"] = x_samples
 
-        if unconditional_guidance_scale > 1.0:
+        if unconditional_guidance_scale > 0.0:
             uc_video = torch.zeros_like(vc)
             uc_cross = self.get_unconditional_conditioning(N)
             uc_cond = {"c_crossattn": [uc_cross], "c_video": [uc_video]}

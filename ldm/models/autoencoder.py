@@ -62,8 +62,8 @@ class AutoencoderKL(pl.LightningModule):
                 if k.startswith(ik):
                     print("Deleting key {} from state_dict.".format(k))
                     del sd[k]
-        self.load_state_dict(sd, strict=False)
-        print(f"Restored from {path}")
+        self.load_state_dict(sd, strict=True)
+        print(f"NOTE!! Restore AutoEncoderKL from {path}")
 
     @contextmanager
     def ema_scope(self, context=None):

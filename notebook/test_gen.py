@@ -49,6 +49,31 @@ def get_dataloader(data_cfg, batch_size):
     )
     return dataloader
 
+def save_log_samples(batch_idx, batch, tensor, video_length, save_mode, sampledir):
+    print(f"Current sampledir: {sampledir}")
+    os.makedirs(sampledir, exist_ok=True)
+    cur_video = tensor.detach().cpu()
+    if save_mode == "bybatch":
+        save = tensor2img(cur_video)
+        save.save(os.path.join(sampledir, f"{batch_idx:04d}.jpg"))
+    elif save_mode == "byvideo":
+        video_names = batch['video_name']
+        for b, name in enumerate(video_names):
+            save = tensor2img(cur_video[b])
+            video_name = f"b{batch_idx:04d}{b:02d}-v{name}"
+            save.save(os.path.join(sampledir, f"{video_name}.jpg"))
+    elif save_mode == "byframe":
+        video_names = batch['video_name']
+        for b, name in enumerate(video_names):
+            video_name = f"b{batch_idx:04d}{b:02d}-v{name}"
+            save_path = os.path.join(sampledir, video_name)
+            os.makedirs(save_path, exist_ok=False)  # TODO
+            sample = rearrange(cur_video[b], 'c h (t w) -> t c h w', t=video_length)
+            for t in range(video_length):
+                frame = tensor2img(sample[t])
+                frame.save(os.path.join(save_path, f"{t:04d}.jpg"))
+    else:
+        raise NotImplementedError
 
 if __name__ == "__main__":
     sys.path.append(os.getcwd())
@@ -78,13 +103,6 @@ if __name__ == "__main__":
         nowname = _tmp[-1]
     else:
         raise  NotImplementedError
-    if opt.use_gauss_shift:
-        sampledir = os.path.join(logdir, f'samples-{opt.save_mode}-ucgs{opt.unconditional_guidance_scale}-'
-                                         f'{os.path.basename(ckpt).split(".")[0]}-shift')
-    else:
-        sampledir = os.path.join(logdir, f'samples-{opt.save_mode}-ucgs{opt.unconditional_guidance_scale}-'
-                                         f'{os.path.basename(ckpt).split(".")[0]}')
-    os.makedirs(sampledir, exist_ok=True)
     seed_everything(opt.seed)
 
     # init and save configs
@@ -111,72 +129,59 @@ if __name__ == "__main__":
 
     # data
     print(f"- Loading validation data...")
-    bs = opt.batch_size or config.data.params.batch_size
+    bs = 8
+    # bs = opt.batch_size or config.data.params.batch_size
     if opt.dataset_root is not None:
+        config.data.params.train.params.root = opt.dataset_root
         config.data.params.validation.params.root = opt.dataset_root
     dataloader = get_dataloader(config.data.params.validation, bs)
-    part_num = len(dataloader) / opt.total_part
-    start_idx = (opt.cur_part - 1) * part_num
-    end_idx = opt.cur_part * part_num
 
-    # start to generate
-    vc = None
-    if opt.use_gauss_shift:
-        std = np.load(opt.gauss_shift_std)
-        mean = np.load(opt.gauss_shift_mean)
-        std = torch.tensor(std).to(model.device)
-        mean = torch.tensor(mean).to(model.device)
-    verbose = opt.test_verbose
-    save_mode = opt.save_mode # bybatch, byvideo, byframe
-    ddim_step = opt.ddim_step
-    video_length = opt.video_length
-    total_sample_number = opt.total_sample_number
-    unconditional_guidance_scale = opt.unconditional_guidance_scale
-    print(f"- Saving generated samples to {sampledir}")
-    print(f"- Cur part {opt.cur_part}/{opt.total_part} with idx from {start_idx} to {end_idx}")
-    batch_idx = 0
-    for batch in tqdm(iter(dataloader)):
-        if batch_idx >= start_idx and batch_idx < end_idx:
-            if vc is None:
-                vc, _ = model.get_input(batch, None)
-            x_T = torch.randn_like(vc)
-            if opt.use_gauss_shift:
-                x_T = mean + x_T * std
-            sample_log = model.log_videos(batch, N=bs, n_frames=video_length, x_T=x_T,
-                                          verbose=verbose, sample=False, ddim_steps=ddim_step,
-                                          unconditional_guidance_scale=unconditional_guidance_scale)
-            if unconditional_guidance_scale == 0.0:
-                cur_video = sample_log["samples"]
-            else:
-                cur_video = sample_log[f"samples_ug_scale_{unconditional_guidance_scale:.2f}"]
-            cur_video = cur_video.detach().cpu() # b c t h w
-            if len(cur_video.shape) == 4: # b c h tw
-                cur_video = rearrange(cur_video, 'b c h (t w) -> b c t h w', t=video_length)
-            if save_mode == "bybatch":
-                save = tensor2img(rearrange(cur_video, 'b c t h w -> c (b h) (t w)'))
-                save.save(os.path.join(sampledir, f"{batch_idx:04d}.jpg"))
-            elif save_mode == "byvideo":
-                video_names = batch['video_name']
-                for b, name in enumerate(video_names):
-                    save = tensor2img(cur_video[b])
-                    video_name = f"b{batch_idx:04d}{b:02d}-v{name}-s{opt.seed}"
-                    save.save(os.path.join(sampledir, f"{video_name}.jpg"))
-            elif save_mode == "byframe":
-                video_names = batch['video_name']
-                for b, name in enumerate(video_names):
-                    video_name = f"b{batch_idx:04d}{b:02d}-v{name}-s{opt.seed}"
-                    save_path = os.path.join(sampledir, video_name)
-                    os.makedirs(save_path, exist_ok=True)
-                    sample = rearrange(cur_video[b], 'c t h w -> t c h w')
-                    for t in range(video_length):
-                        frame = tensor2img(sample[t])
-                        frame.save(os.path.join(save_path, f"{t:04d}.jpg"))
-            else:
-                raise NotImplementedError
+    """
+     ====== test generation results ======
+    """
+    # hyper parameters
+    ucgs = 9.0
+    n_frames = 4
+    save_mode = "bybatch"
 
-            if bs * (batch_idx + 1) >= total_sample_number or \
-                    len(os.listdir(sampledir)) >= total_sample_number:
-                final_number = max(len(os.listdir(sampledir)), bs * (batch_idx + 1))
-                print(f"Having generated {final_number} video samples in {sampledir}!")
-                exit()
-        batch_idx += 1
+    # obtain a batch as input
+    print(f"- Logdir: {logdir}")
+    batch_idx, batch = next(enumerate(dataloader))
+    vc, cond = model.get_input(batch, None)
+    noise = torch.randn_like(vc)
+
+    # utils
+    kwargs = {
+        'batch': batch,
+        'batch_idx': batch_idx,
+        'save_mode': save_mode,
+        'video_length': n_frames,
+    }
+    def sample_then_log(x_T, prefix):
+        sample_log = model.log_videos(batch=batch, N=vc.shape[0], x_T=x_T,
+                                      n_frames=n_frames, unconditional_guidance_scale=ucgs)
+        tensor = sample_log["samples"]
+        sampledir = os.path.join(logdir, f'{prefix}-s{opt.seed}')
+        save_log_samples(tensor=tensor, sampledir=sampledir, **kwargs)
+        tensor = sample_log[f"samples_ug_scale_{ucgs:.2f}"]
+        sampledir = os.path.join(logdir, f'{prefix}-ucgs{ucgs:.2f}-s{opt.seed}')
+        save_log_samples(tensor=tensor, sampledir=sampledir, **kwargs)
+
+    print(batch['txt'])
+    # ----- raw samples -----
+    sample_then_log(x_T=noise, prefix="samples-raw")
+
+    # ----- from training updates -----
+    # state = torch.load('ucf_gauss_shifts.pth',
+    #                    map_location=vc.device)['state_dict']
+    # std = state['sample_gauss_std'].unsqueeze(0)
+    # mean = state['sample_gauss_mean'].unsqueeze(0)
+    std = np.load("notebook/sample_gauss_shifts/ucf101_256x_std_training.npy")
+    mean = np.load("notebook/sample_gauss_shifts/ucf101_256x_mean_training.npy")
+    std = torch.tensor(std).to(vc.device)
+    mean = torch.tensor(mean).to(vc.device)
+    sample_then_log(mean + std * noise, "samples-training")
+
+    # ----- from independent process -----
+
+    sample_then_log(mean + std * noise, "samples-preprocessing")

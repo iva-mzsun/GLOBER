@@ -60,7 +60,7 @@ def make_ddim_timesteps(ddim_discr_method, num_ddim_timesteps, num_ddpm_timestep
     return steps_out
 
 
-def make_ddim_sampling_parameters(alphacums, ddim_timesteps, eta, verbose=True):
+def make_ddim_sampling_parameters(alphacums, ddim_timesteps, eta, verbose=False):
     # select alphas for computing the variance schedule
     alphas = alphacums[ddim_timesteps]
     alphas_prev = np.asarray([alphacums[0]] + alphacums[ddim_timesteps[:-1]].tolist())

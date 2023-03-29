@@ -2,6 +2,7 @@ model:
   base_learning_rate: 1e-4
   target: cldm.ldmae_v3.AutoEncLDM
   params:
+    kl_loss_weight: 0.000001
     sd_lock_input: False
     sd_lock_middle: False
     sd_lock_output: False
@@ -47,6 +48,7 @@ model:
         num_head_channels: 64
         use_checkpoint: True
         legacy: False
+        learn_var: True
 
     unet_config:
       target: cldm.ldmae_v3.AEUnetModel
@@ -113,7 +115,6 @@ data:
           - 31
         full_video_length: 32
         root: /raid/72_datasets/ucf101/trainval_32fps
-#        root: /home/zhongguokexueyuanzidonghuayanjiusuo/datasets/UCF-101/frames_fps20
     validation:
       target: cldm.data.custom.VideoFolderDataset_AE
       params:
@@ -129,15 +130,14 @@ data:
           - 31
         full_video_length: 32
         root: /raid/72_datasets/ucf101/ucf101_fps32_test2048_wclasses
-#        root: /home/zhongguokexueyuanzidonghuayanjiusuo/datasets/UCF-101/frames_fps20
 
 lightning:
   trainer:
     ckpt_load_strict: False
     accelerator: 'gpu'
-    devices: 8
+    devices: 4
     log_gpu_memory: all
-    max_epochs: 1000
+    max_epochs: 500
     precision: 16
     auto_select_gpus: False
     strategy:

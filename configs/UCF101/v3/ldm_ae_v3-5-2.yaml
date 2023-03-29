@@ -128,7 +128,7 @@ data:
           - 20
           - 31
         full_video_length: 32
-        root: /raid/72_datasets/ucf101/trainval_32fps
+        root: /raid/72_datasets/ucf101/ucf101_fps32_test2048_wclasses
 #        root: /home/zhongguokexueyuanzidonghuayanjiusuo/datasets/UCF-101/frames_fps20
 
 lightning:

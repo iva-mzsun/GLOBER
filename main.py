@@ -34,34 +34,13 @@ except:
 
 from ipdb import set_trace as st
 
-from ldm.util import instantiate_from_config, tensor2img
+from ldm.util import instantiate_from_config, tensor2img, load_state_dict
 # from ldm.modules.attention import enable_flash_attentions
 
 class DataLoaderX(DataLoader):
 
     def __iter__(self):
         return BackgroundGenerator(super().__iter__())
-
-def get_state_dict(d):
-    return d.get('state_dict', d)
-
-def load_state_dict(ckpt_path, location='cpu'):
-    _, extension = os.path.splitext(ckpt_path)
-    if extension.lower() == ".safetensors":
-        import safetensors.torch
-        state_dict = safetensors.torch.load_file(ckpt_path, device=location)
-    else:
-        state_dict = get_state_dict(torch.load(ckpt_path, map_location=torch.device(location)))
-    state_dict = get_state_dict(state_dict)
-
-    from collections import OrderedDict
-    new_state_dict = OrderedDict()
-    for k, v in state_dict.items():
-        if 'hint' in k:
-            continue
-        new_state_dict[k] = v
-    print(f'Loaded state_dict from [{ckpt_path}]')
-    return new_state_dict
 
 def get_parser(**parser_kwargs):
 
@@ -114,7 +93,7 @@ def get_parser(**parser_kwargs):
     )
     parser.add_argument(
         "--ckpt",
-        default='./models/control_sd21_ini.ckpt'
+        default=None
     )
     parser.add_argument(
         "--batch_size",
@@ -172,6 +151,11 @@ def get_parser(**parser_kwargs):
     parser.add_argument("--total_sample_number", type=int, default=16)
     parser.add_argument("--unconditional_guidance_scale", type=float, default=9.0)
     parser.add_argument("--dataset_root", type=str, default=None)
+    parser.add_argument("--cur_part", type=int, default=1)
+    parser.add_argument("--total_part", type=int, default=1)
+    parser.add_argument("--use_gauss_shift", type=bool, default=False)
+    parser.add_argument("--gauss_shift_std", type=str, default=None)
+    parser.add_argument("--gauss_shift_mean", type=str, default=None)
     return parser
 
 def nondefault_trainer_args(opt):
@@ -464,6 +448,7 @@ def obtain_trainer_kwargs(trainer_config, opt):
             "target": "main.ImageLogger",
             "params": {
                 "clamp": True,
+                "log_imgs": False,
                 "local_dir": imgdir,
             }
         },
@@ -499,7 +484,7 @@ def obtain_trainer_kwargs(trainer_config, opt):
     }
     if hasattr(model, "monitor"):
         default_modelckpt_cfg["params"]["monitor"] = model.monitor
-        default_modelckpt_cfg["params"]["save_top_k"] = 2
+        default_modelckpt_cfg["params"]["save_top_k"] = 1
     if "modelcheckpoint" in lightning_config:
         modelckpt_cfg = lightning_config.modelcheckpoint
     else:
@@ -563,6 +548,7 @@ if __name__ == "__main__":
     opt, unknown = parser.parse_known_args()
 
     # set save directories
+    ckpt = None
     if opt.resume:
         rank_zero_info("Resuming from {}".format(opt.resume))
         if not os.path.exists(opt.resume):
@@ -624,10 +610,15 @@ if __name__ == "__main__":
         config.model["params"].update({"use_fp16": True})
     else:
         config.model["params"].update({"use_fp16": False})
-    load_strict = trainer_config.get('ckpt_load_strict', True)
     model = instantiate_from_config(config.model).cpu()
-    model.load_state_dict(load_state_dict(ckpt.strip(), location='cpu'), strict=load_strict)
-    print(f"Load ckpt from {ckpt} with strict {load_strict}")
+    if ckpt is not None:
+        load_strict = trainer_config.get('ckpt_load_strict', True)
+        ignore_keys = trainer_config.get('ignore_keys', [])
+        state = load_state_dict(ckpt.strip(), ignore_keys=ignore_keys)
+        model.load_state_dict(state, strict=load_strict)
+        print(f"Load ckpt from {ckpt} with strict {load_strict}")
+    else:
+        print(f"WARNING!! No pretrained LDM!!!")
 
     # create trainer
     trainer_kwargs = obtain_trainer_kwargs(trainer_config, opt)

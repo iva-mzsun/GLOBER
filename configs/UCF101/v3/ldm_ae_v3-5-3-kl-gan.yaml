@@ -1,7 +1,8 @@
 model:
   base_learning_rate: 1e-4
-  target: cldm.ldmae_v3.AutoEncLDM
+  target: cldm.ldmae_v3_wgan.AutoEncLDM
   params:
+    kl_loss_weight: 0.000001
     sd_lock_input: False
     sd_lock_middle: False
     sd_lock_output: False
@@ -31,9 +32,40 @@ model:
         f_max: [ 1. ]
         f_min: [ 1. ]
 
+    gan_config:
+      adversarial_loss: hinge
+      generator_loss_weight: 0.1
+      spatial_discriminator:
+        target: cldm.ldmae_v3_wgan.Discriminator
+        params:
+          dims: 3
+          image_size: 32
+          in_channels: 4
+          model_channels: 256
+          num_res_blocks: 1
+          attention_resolutions: [ 2, 4, 8, 16 ]
+          channel_mult: [ 1, 1, 2, 2, 2 ]
+          num_head_channels: 32
+          use_checkpoint: True
+          legacy: False
+      temporal_discriminator:
+        target: cldm.ldmae_v3_wgan.Discriminator
+        params:
+          dims: 3
+          image_size: 32
+          in_channels: 4
+          model_channels: 256
+          num_res_blocks: 1
+          attention_resolutions: [ 2, 4, 8, 16 ]
+          channel_mult: [ 1, 1, 2, 2, 2 ]
+          num_head_channels: 32
+          use_checkpoint: True
+          legacy: False
+          temporal_embeddings: True
+
     videocontent_key: "full_frame"
     videoenc_config:
-      target: cldm.ldmae_v3.VideoContentEnc
+      target: cldm.ldmae_v3_wgan.VideoContentEnc
       params:
         dims: 3
         image_size: 32
@@ -47,9 +79,10 @@ model:
         num_head_channels: 64
         use_checkpoint: True
         legacy: False
+        learn_var: True
 
     unet_config:
-      target: cldm.ldmae_v3.AEUnetModel
+      target: cldm.ldmae_v3_wgan.AEUnetModel
       params:
         image_size: 32 # unused
         in_channels: 4
@@ -65,7 +98,7 @@ model:
         use_checkpoint: True
         legacy: False
 
-    first_stage_key: "tar_frame" # current video frame
+    first_stage_key: "tar_frames" # current video frame
     first_stage_config:
       target: ldm.models.autoencoder.AutoencoderKL
       params:
@@ -100,11 +133,12 @@ data:
     batch_size: 40
     num_workers: 4
     train:
-      target: cldm.data.custom.VideoFolderDataset_AE
+      target: cldm.data.custom.VideoFolderDataset_AEwT
       params:
         size: 256
         flip_p: 0.5
-        start_zero_p: 0.1
+        num_frames: 2
+        sort_index: True
 #        max_data_num: 96 # For debug
         content_frame_idx:
           - 0
@@ -113,15 +147,15 @@ data:
           - 31
         full_video_length: 32
         root: /raid/72_datasets/ucf101/trainval_32fps
-#        root: /home/zhongguokexueyuanzidonghuayanjiusuo/datasets/UCF-101/frames_fps20
     validation:
-      target: cldm.data.custom.VideoFolderDataset_AE
+      target: cldm.data.custom.VideoFolderDataset_AEwT
       params:
         size: 256
-        flip_p: 0.5
-        start_zero_p: 0.1
-        max_data_num: 2048
+        num_frames: 2
+        sort_index: True
 #        max_data_num: 96 # for debug
+        allow_flip: False
+        allow_point: False
         content_frame_idx:
           - 0
           - 10
@@ -129,7 +163,6 @@ data:
           - 31
         full_video_length: 32
         root: /raid/72_datasets/ucf101/ucf101_fps32_test2048_wclasses
-#        root: /home/zhongguokexueyuanzidonghuayanjiusuo/datasets/UCF-101/frames_fps20
 
 lightning:
   trainer:
@@ -137,7 +170,7 @@ lightning:
     accelerator: 'gpu'
     devices: 8
     log_gpu_memory: all
-    max_epochs: 1000
+    max_epochs: 250
     precision: 16
     auto_select_gpus: False
     strategy:

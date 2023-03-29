@@ -1,19 +1,13 @@
 model:
   base_learning_rate: 1e-4
-  target: cldm.ldmae_v3.AutoEncLDM
+  target: ldm_generator.ldm_generator_v1.Generator_LDM
   params:
-    sd_lock_input: False
-    sd_lock_middle: False
-    sd_lock_output: False
-    optimize_params_key: ~
     linear_start: 0.00085
     linear_end: 0.0120
     num_timesteps_cond: 1
     log_every_t: 200
     timesteps: 1000
-    cond_stage_key: "txt"
-    frame_index_key: "frame_index"
-    image_size: 32
+    image_size: 8
     channels: 4
     cond_stage_trainable: false
     conditioning_key: crossattn
@@ -21,54 +15,33 @@ model:
     scale_factor: 0.18215
     use_ema: False
     learn_logvar: False
-
-    scheduler_config: # 10000 warmup steps
-      target: ldm.lr_scheduler.LambdaLinearScheduler
-      params:
-        warm_up_steps: [ 1000 ] # NOTE for resuming. use 10000 if starting from scratch
-        cycle_lengths: [ 10000000000000 ] # incredibly large number to prevent corner cases
-        f_start: [ 1.e-6 ]
-        f_max: [ 1. ]
-        f_min: [ 1. ]
-
     videocontent_key: "full_frame"
-    videoenc_config:
-      target: cldm.ldmae_v3.VideoContentEnc
-      params:
-        dims: 3
-        image_size: 32
-        in_channels: 4
-        out_channels: 16
-        model_channels: 320
-        num_res_blocks: 2
-        learnable_content: True
-        attention_resolutions: [ 1, 2 ]
-        channel_mult: [ 1, 2]
-        num_head_channels: 64
-        use_checkpoint: True
-        legacy: False
+    validation_log_start_epoch: 0
+    validation_log_every_epochs: 10
 
-    unet_config:
-      target: cldm.ldmae_v3.AEUnetModel
-      params:
-        image_size: 32 # unused
-        in_channels: 4
-        out_channels: 4
-        model_channels: 320
-        attention_resolutions: [ 4, 2, 1 ]
-        num_res_blocks: 2
-        channel_mult: [ 1, 2, 4, 4 ]
-        num_heads: 8
-        use_spatial_transformer: True
-        transformer_depth: 1
-        context_dim: 768
-        use_checkpoint: True
-        legacy: False
+    vc_size: 16
+    vc_channels: 16
+    latent_size: 32
+    latent_channels: 4
 
-    first_stage_key: "tar_frame" # current video frame
+    diffusion_config:
+      target: ldm_generator.diffusion.dit_model.DiT_crossattn
+      params:
+        use_fp16: True
+        input_size: 16
+        patch_size: 1
+        in_channels: 16
+        hidden_size: 1152
+        depth: 28
+        num_heads: 16
+        mlp_ratio: 4
+        learn_sigma: False
+
+    first_stage_key: "tar_frames" # current video frames
     first_stage_config:
       target: ldm.models.autoencoder.AutoencoderKL
       params:
+        ckpt_path: pretrained/autoencoderkl.pth
         embed_dim: 4
         monitor: val/rec_loss
         ddconfig:
@@ -89,8 +62,55 @@ model:
         lossconfig:
           target: torch.nn.Identity
 
+    cond_stage_key: "txt"
     cond_stage_config:
       target: ldm.modules.encoders.modules.FrozenCLIPEmbedder
+
+    stable_ae_config:
+      target: ldm_generator.wrapper.StableAutoencoder
+      params:
+        linear_start: 0.00085
+        linear_end: 0.0120
+        log_every_t: 200
+        timesteps: 1000
+        image_size: 32
+        channels: 4
+        conditioning_key: crossattn
+        use_ema: False
+        learn_logvar: False
+        enc_cfg:
+          target: cldm.ldmae_v3.VideoContentEnc
+          params:
+            dims: 3
+            image_size: 32
+            in_channels: 4
+            out_channels: 16
+            model_channels: 320
+            num_res_blocks: 2
+            learnable_content: True
+            attention_resolutions: [ 1, 2 ]
+            channel_mult: [ 1, 2 ]
+            num_head_channels: 64
+            use_checkpoint: True
+            legacy: False
+            learn_var: True
+        diffusion_config:
+          target: cldm.ldmae_v3.AEUnetModel
+          params:
+            image_size: 32 # unused
+            in_channels: 4
+            out_channels: 4
+            model_channels: 320
+            attention_resolutions: [ 4, 2, 1 ]
+            num_res_blocks: 2
+            channel_mult: [ 1, 2, 4, 4 ]
+            num_heads: 8
+            use_spatial_transformer: True
+            transformer_depth: 1
+            context_dim: 768
+            use_checkpoint: True
+            legacy: False
+        ckpt_path: experiments/2023-03-17T11-36-47_ldm_ae_v3-5-3-kl-gan2/checkpoints/last.ckpt
 
 data:
   target: main.DataModuleFromConfig
@@ -100,11 +120,12 @@ data:
     batch_size: 40
     num_workers: 4
     train:
-      target: cldm.data.custom.VideoFolderDataset_AE
+      target: cldm.data.custom.VideoFolderDataset_AEwT
       params:
         size: 256
         flip_p: 0.5
-        start_zero_p: 0.1
+        num_frames: 2
+        sort_index: True
 #        max_data_num: 96 # For debug
         content_frame_idx:
           - 0
@@ -113,15 +134,15 @@ data:
           - 31
         full_video_length: 32
         root: /raid/72_datasets/ucf101/trainval_32fps
-#        root: /home/zhongguokexueyuanzidonghuayanjiusuo/datasets/UCF-101/frames_fps20
     validation:
-      target: cldm.data.custom.VideoFolderDataset_AE
+      target: cldm.data.custom.VideoFolderDataset_AEwT
       params:
         size: 256
-        flip_p: 0.5
-        start_zero_p: 0.1
-        max_data_num: 2048
+        num_frames: 2
+        sort_index: True
 #        max_data_num: 96 # for debug
+        allow_flip: False
+        allow_point: False
         content_frame_idx:
           - 0
           - 10
@@ -129,7 +150,6 @@ data:
           - 31
         full_video_length: 32
         root: /raid/72_datasets/ucf101/ucf101_fps32_test2048_wclasses
-#        root: /home/zhongguokexueyuanzidonghuayanjiusuo/datasets/UCF-101/frames_fps20
 
 lightning:
   trainer:
@@ -137,21 +157,13 @@ lightning:
     accelerator: 'gpu'
     devices: 8
     log_gpu_memory: all
-    max_epochs: 1000
+    max_epochs: 1500
     precision: 16
     auto_select_gpus: False
     strategy:
       target: strategies.DDPStrategy
       params:
         find_unused_parameters: True
-#    strategy:
-#      target: strategies.ColossalAIStrategy
-#      params:
-#        use_chunk: True
-#        enable_distributed_storage: True
-#        placement_policy: cuda
-#        force_outputs_fp32: true
-#        min_chunk_size: 64
 
     log_every_n_steps: 2
     logger: True

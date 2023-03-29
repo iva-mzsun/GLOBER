@@ -4,6 +4,7 @@ import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
 import torchvision.transforms.functional as F
+from ipdb import set_trace as st
 
 def center_crop(im): # im: PIL.Image
     width, height = im.size   # Get dimensions
@@ -79,7 +80,7 @@ class CustomDataset_1to1(Dataset):
 
 # ================================================
 class VideoFolderDataset_AE(Dataset):
-    def __init__(self, root, start_zero_p=0.1,
+    def __init__(self, root, start_zero_p=0.1, shuffle=False,
                  content_frame_idx=(0, 15), full_video_length=16,
                  flip_p=0.5, size=None, max_data_num=None):
         self.size = size
@@ -90,6 +91,9 @@ class VideoFolderDataset_AE(Dataset):
         self.interpolation = Image.BICUBIC
         # load data
         self.videos = sorted(os.listdir(root))
+        if shuffle:
+            from random import shuffle
+            shuffle(self.videos)
         if max_data_num is not None:
             self.videos = self.videos[:max_data_num]
         self.vid2img = dict({})
@@ -162,22 +166,25 @@ class VideoFolderDataset_AE(Dataset):
 
 class VideoFolderDataset_AEwT(Dataset):
     def __init__(self, root, num_frames, allow_flip=True, allow_point=True, sort_index=False,
-                 content_frame_idx=(0, 10, 20, 31), full_video_length=32,
-                 flip_p=0.5, size=None, max_data_num=None):
+                 content_frame_idx=(0, 10, 20, 31), full_video_length=32, shuffle=True,
+                 fix_prompt=None, flip_p=0.5, size=None, max_data_num=None):
         self.size = size
         self.flip_prob = flip_p
         self.sort_index = sort_index
         self.num_frames = num_frames
         self.allow_filp = allow_flip
         self.allow_point = allow_point
+        self.fix_prompt = fix_prompt
         self.content_frame_idx = content_frame_idx
         self.full_video_length = full_video_length
         self.interpolation = Image.BICUBIC
         # load data
         self.videos = sorted(os.listdir(root))
-        if max_data_num is not None:
+        if shuffle:
+            print("- NOTE: shuffle video ids!")
             from random import shuffle
             shuffle(self.videos)
+        if max_data_num is not None:
             self.videos = self.videos[:max_data_num]
         self.vid2img = dict({})
         self.vidpoint = dict({})
@@ -214,9 +221,16 @@ class VideoFolderDataset_AEwT(Dataset):
         if cpoint + self.full_video_length >= len(self.vid2img[curv]):
             self.vidpoint[curv] = 0
 
+    def obtain_content_frame_idx(self, video_length):
+        if self.full_video_length <= video_length:
+            return self.content_frame_idx
+        else:
+            part = video_length // 3
+            return [0, part*1-1, part*2-1, part*3-1]
+
     def __getitem__(self, idx):
         curv = self.videos[idx]
-        prompt = curv.split('_')[1]
+        prompt = self.fix_prompt or curv.split('_')[1]
         # determine if flip
         p = np.random.rand()
         if_flip = p < self.flip_prob \
@@ -227,11 +241,12 @@ class VideoFolderDataset_AEwT(Dataset):
         self.update_point(curv)
         # load video content frames
         content_frames = []
-        for i in self.content_frame_idx:
+        for i in self.obtain_content_frame_idx(len(frames)):
             content_frames.append(self.load_img(frames[point + i], if_flip)[:, np.newaxis, :, :])
         content_frames = np.concatenate(content_frames, axis=1)
         # random select target frame indexes
-        tar_indexes = np.random.randint(0, self.full_video_length, self.num_frames)
+        video_length = min(self.full_video_length, len(frames))
+        tar_indexes = np.random.randint(0, video_length, self.num_frames)
         if self.sort_index:
             tar_indexes = np.sort(tar_indexes)
         # load target video frames
@@ -239,9 +254,7 @@ class VideoFolderDataset_AEwT(Dataset):
         for ind in tar_indexes:
             tar_frame = self.load_img(frames[point + ind], if_flip)
             tar_frames.append(tar_frame[:, np.newaxis, :, :])
-
-        tar_indexes = tar_indexes.astype(np.float) / self.full_video_length
-        # tar_indexes =  self.full_video_length
+        tar_indexes = tar_indexes.astype(np.float) / video_length
         tar_frames = np.concatenate(tar_frames, axis=1)
 
         return dict({

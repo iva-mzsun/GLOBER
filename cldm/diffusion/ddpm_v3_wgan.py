@@ -85,6 +85,8 @@ class DDPM(pl.LightningModule):
         ucg_training=None,
         reset_ema=False,
         reset_num_ema_updates=False,
+        validation_log_start_epoch=0,
+        validation_log_every_epochs=1,
     ):
         super().__init__()
         assert parameterization in ["eps", "x0", "v"], 'currently only supporting "eps" and "x0" and "v"'
@@ -98,6 +100,8 @@ class DDPM(pl.LightningModule):
         self.channels = channels
         self.use_positional_encodings = use_positional_encodings
         self.model = DiffusionWrapper(unet_config, conditioning_key)
+        self.validation_log_start_epoch = validation_log_start_epoch
+        self.validation_log_every_epochs = validation_log_every_epochs
         # count_params(self.model, verbose=True)
         self.use_ema = use_ema
         if self.use_ema:
@@ -443,7 +447,7 @@ class DDPM(pl.LightningModule):
         loss, loss_dict = self(x)
         return loss, loss_dict
 
-    def training_step(self, batch, batch_idx, optimizer_idx):
+    def training_step(self, batch, batch_idx):
         for k in self.ucg_training:
             p = self.ucg_training[k]["p"]
             val = self.ucg_training[k]["val"]
@@ -453,7 +457,7 @@ class DDPM(pl.LightningModule):
                 if self.ucg_prng.choice(2, p=[1 - p, p]):
                     batch[k][i] = val
 
-        loss, loss_dict = self.shared_step(batch)
+        loss, loss_dict = self.shared_step(batch, is_training=True)
 
         self.log_dict(loss_dict, prog_bar=True,
                       logger=True, on_step=True, on_epoch=True)
@@ -476,9 +480,11 @@ class DDPM(pl.LightningModule):
         self.log_dict(loss_dict_no_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
         self.log_dict(loss_dict_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
 
-        if batch_idx == 0:
-            sample_logs = self.log_videos(batch)
-            return sample_logs
+        sample_logs = dict({})
+        if batch_idx == 0 and self.current_epoch >= self.validation_log_start_epoch:
+            if self.current_epoch % self.validation_log_every_epochs == 0:
+                sample_logs = self.log_videos(batch)
+        return sample_logs
 
     def on_train_batch_end(self, *args, **kwargs):
         if self.use_ema:
@@ -844,12 +850,12 @@ class LatentDiffusion(DDPM):
     def encode_first_stage(self, x):
         return self.first_stage_model.encode(x)
 
-    def shared_step(self, batch, *args, **kwargs):
+    def shared_step(self, batch, is_training=False, **kwargs):
         x, c = self.get_input(batch, self.first_stage_key)
-        loss = self(x, c, *args, **kwargs)
+        loss = self(x, c, is_training=is_training, **kwargs)
         return loss
 
-    def forward(self, x, c, *args, **kwargs):
+    def forward(self, x, c, is_training=False, *args, **kwargs):
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
         if self.model.conditioning_key is not None:
             assert c is not None
@@ -858,7 +864,7 @@ class LatentDiffusion(DDPM):
             if self.shorten_cond_schedule:    # TODO: drop this option
                 tc = self.cond_ids[t].to(self.device)
                 c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
-        return self.p_losses(x, c, t, *args, **kwargs)
+        return self.p_losses(x, c, t, is_training=is_training, *args, **kwargs)
 
     def apply_model(self, x_noisy, t, cond, return_ids=False):
         if isinstance(cond, dict):

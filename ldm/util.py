@@ -1,5 +1,5 @@
 import importlib
-
+import os
 import torch
 from torch import optim
 import numpy as np
@@ -11,6 +11,10 @@ from PIL import Image, ImageDraw, ImageFont
 
 def tensor2img(x, n_row=4):
     img = x.detach().cpu().float()
+    if len(img.shape) == 5: # b c t h w
+        img = rearrange(img, "b c t h w -> c (b h) (t w)")
+    elif len(img.shape) == 4: # c t h w
+        img = rearrange(img, "c t h w -> c h (t w)")
     x_samples = torch.clamp((img + 1.0) / 2.0, min=0.0, max=1.0)
     x_samples = make_grid(x_samples, nrow=n_row)
     x_samples = 255. * rearrange(x_samples.cpu().numpy(), 'c h w -> h w c')
@@ -85,6 +89,32 @@ def count_params(model, verbose=False):
         print(f"{model.__class__.__name__} has {total_params*1.e-6:.2f} M params.")
     return total_params
 
+def get_state_dict(d):
+    return d.get('state_dict', d)
+
+def load_state_dict(ckpt_path, location='cpu', ignore_keys=[]):
+    _, extension = os.path.splitext(ckpt_path)
+    if extension.lower() == ".safetensors":
+        import safetensors.torch
+        state_dict = safetensors.torch.load_file(ckpt_path, device=location)
+    else:
+        state_dict = get_state_dict(torch.load(ckpt_path, map_location=torch.device(location)))
+    state_dict = get_state_dict(state_dict)
+
+    from collections import OrderedDict
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        if 'hint' in k:
+            continue
+        flag = False
+        for ik in ignore_keys:
+            if ik in k:
+                flag = True
+        if flag:
+            continue
+        new_state_dict[k] = v
+    print(f'Loaded state_dict from [{ckpt_path}]')
+    return new_state_dict
 
 def instantiate_from_config(config):
     if not "target" in config:

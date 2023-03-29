@@ -1,69 +1,53 @@
 model:
-  base_learning_rate: 1e-5
-  target: cldm.cldm.ControlLDM
+  base_learning_rate: 1e-4
+  target: ldm_generator.ldm_generator_v1.Generator_LDM
   params:
-    sd_locked: True
     linear_start: 0.00085
     linear_end: 0.0120
     num_timesteps_cond: 1
     log_every_t: 200
     timesteps: 1000
-    cond_stage_key: "txt"
-    control_key: "src_frame" # previous video frames
-    first_stage_key: "tar_frame" # current video frame
-    image_size: 64
+    image_size: 8
     channels: 4
     cond_stage_trainable: false
     conditioning_key: crossattn
     monitor: val/loss_simple_ema
     scale_factor: 0.18215
     use_ema: False
-    only_mid_control: False
     learn_logvar: False
+    videocontent_key: "full_frame"
 
-    control_stage_config:
-      target: cldm.cldm.ControlNet
+    vc_size: 8
+    vc_channels: 64
+    latent_size: 32
+    latent_channels: 4
+
+    diffusion_config:
+      target: ldm.modules.diffusionmodules.openaimodel.UNetModel
       params:
-        use_checkpoint: True
-        image_size: 32 # unused
-        in_channels: 4
-        hint_channels: 3
-        model_channels: 320
+        use_fp16: True
+        image_size: 8 # unused
+        in_channels: 64
+        out_channels: 64
+        model_channels: 256 #768
         attention_resolutions: [ 4, 2, 1 ]
         num_res_blocks: 2
-        channel_mult: [ 1, 2, 4, 4 ]
-        num_head_channels: 64 # need to fix for flash-attn
+        channel_mult: [ 1, 2, 4 ]
+        num_heads: 8
         use_spatial_transformer: True
-        use_linear_in_transformer: True
         transformer_depth: 1
-        context_dim: 1024
-        legacy: False
-
-    unet_config:
-      target: cldm.cldm.ControlledUnetModel
-      params:
+        context_dim: 768
         use_checkpoint: True
-        image_size: 32 # unused
-        in_channels: 4
-        out_channels: 4
-        model_channels: 320
-        attention_resolutions: [ 4, 2, 1 ]
-        num_res_blocks: 2
-        channel_mult: [ 1, 2, 4, 4 ]
-        num_head_channels: 64 # need to fix for flash-attn
-        use_spatial_transformer: True
-        use_linear_in_transformer: True
-        transformer_depth: 1
-        context_dim: 1024
         legacy: False
 
+    first_stage_key: "tar_frames" # current video frames
     first_stage_config:
       target: ldm.models.autoencoder.AutoencoderKL
       params:
+        ckpt_path: models/autoencoderkl.pth
         embed_dim: 4
         monitor: val/rec_loss
         ddconfig:
-          #attn_type: "vanilla-xformers"
           double_z: true
           z_channels: 4
           resolution: 256
@@ -81,18 +65,62 @@ model:
         lossconfig:
           target: torch.nn.Identity
 
+    cond_stage_key: "txt"
     cond_stage_config:
-      target: ldm.modules.encoders.modules.FrozenOpenCLIPEmbedder
+      target: ldm.modules.encoders.modules.FrozenCLIPEmbedder
+
+    stable_ae_config:
+      target: ldm_generator.wrapper.StableAutoencoder
       params:
-        freeze: True
-        layer: "penultimate"
+        linear_start: 0.00085
+        linear_end: 0.0120
+        log_every_t: 200
+        timesteps: 1000
+        image_size: 32
+        channels: 4
+        conditioning_key: crossattn
+        monitor: val/loss_simple_ema
+        use_ema: False
+        learn_logvar: False
+        enc_cfg:
+          target: cldm.ldmae_v5.VideoContentEnc
+          params:
+            dims: 3
+            image_size: 32
+            in_channels: 4
+            out_channels: 64
+            model_channels: 320
+            num_res_blocks: 1
+            learnable_content: True
+            attention_resolutions: [ 1, 2 ]
+            channel_mult: [ 1, 2, 4 ]
+            num_head_channels: 64
+            use_checkpoint: True
+            legacy: False
+        diffusion_config:
+          target: cldm.ldmae_v5.AEUnetModel
+          params:
+            image_size: 32 # unused
+            in_channels: 4
+            out_channels: 4
+            model_channels: 320
+            attention_resolutions: [ 4, 2, 1 ]
+            num_res_blocks: 2
+            channel_mult: [ 1, 2, 4, 4 ]
+            num_heads: 8
+            use_spatial_transformer: True
+            transformer_depth: 1
+            context_dim: 768
+            use_checkpoint: True
+            legacy: False
+        ckpt_path: experiments/2023-03-07T20-56-08_ldm_ae_v5-2/checkpoints/epoch=0120-step=028798.ckpt
 
 data:
   target: main.DataModuleFromConfig
   params:
     wrap: False
-    batch_size: 4 # For debug
-#    batch_size: 28
+    batch_size: 2 # For debug
+#    batch_size: 40
     num_workers: 4
     train:
       target: cldm.data.custom.VideoFolderDataset_AEwT
@@ -100,6 +128,7 @@ data:
         size: 256
         flip_p: 0.5
         num_frames: 2
+        allow_point: False # TODO
         max_data_num: 96 # For debug
         content_frame_idx:
           - 0
@@ -126,6 +155,7 @@ data:
 
 lightning:
   trainer:
+    ckpt_load_strict: False
     accelerator: 'gpu'
     devices: 4
     log_gpu_memory: all
@@ -136,18 +166,16 @@ lightning:
       target: strategies.DDPStrategy
       params:
         find_unused_parameters: True
-#    strategy:
-#      target: strategies.ColossalAIStrategy
-#      params:
-#        use_chunk: True
-#        enable_distributed_storage: True
-#        placement_policy: cuda
-#        force_outputs_fp32: true
-#        min_chunk_size: 64
 
     log_every_n_steps: 2
     logger: True
     default_root_dir: "experiments/"
+
+  callbacks:
+    image_logger:
+      target: main.ImageLogger
+      params:
+        log_imgs: True
 
   logger:
     wandb:

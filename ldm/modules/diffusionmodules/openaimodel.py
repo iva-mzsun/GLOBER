@@ -412,7 +412,7 @@ class ResBlock(TimestepBlock):
             try:
                 h = self.h_upd(h)
             except:
-                st()
+                st() # TODO
             x = self.x_upd(x)
             h = in_conv(h)
         else:

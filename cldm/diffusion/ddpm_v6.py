@@ -844,12 +844,12 @@ class LatentDiffusion(DDPM):
     def encode_first_stage(self, x):
         return self.first_stage_model.encode(x)
 
-    def shared_step(self, batch, *args, **kwargs):
+    def shared_step(self, batch, sample_posterior=False, *args, **kwargs):
         x, c = self.get_input(batch, self.first_stage_key)
-        loss = self(x, c, *args, **kwargs)
+        loss = self(x, c, sample_posterior=sample_posterior, *args, **kwargs)
         return loss
 
-    def forward(self, x, c, *args, **kwargs):
+    def forward(self, x, c, sample_posterior=False, *args, **kwargs):
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
         if self.model.conditioning_key is not None:
             assert c is not None
@@ -858,7 +858,7 @@ class LatentDiffusion(DDPM):
             if self.shorten_cond_schedule:    # TODO: drop this option
                 tc = self.cond_ids[t].to(self.device)
                 c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
-        return self.p_losses(x, c, t, *args, **kwargs)
+        return self.p_losses(x, c, t, sample_posterior=sample_posterior, *args, **kwargs)
 
     def apply_model(self, x_noisy, t, cond, return_ids=False):
         if isinstance(cond, dict):
