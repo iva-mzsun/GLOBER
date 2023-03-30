@@ -56,103 +56,58 @@ def get_parser(**parser_kwargs):
 
     parser = argparse.ArgumentParser(**parser_kwargs)
     parser.add_argument(
-        "-b",
-        "--base",
-        nargs="*",
-        metavar="base_config.yaml",
+        "-b", "--base", nargs="*", metavar="base_config.yaml", default=list(),
         help="paths to base configs. Loaded from left-to-right. "
-             "Parameters can be overwritten or added with command-line options of the form `--key value`.",
-        default=list(),
+             "Parameters can be overwritten or added with command-line options of the form `--key value`."
     )
     parser.add_argument(
-        "-n",
-        "--name",
-        type=str,
-        default="",
+        "-n", "--name", type=str, default="",
         help="postfix for logdir",
     )
     parser.add_argument(
-        "--mode",
-        type=str,
-        default="train",
+        "--mode", type=str, default="train",
         help="running mode",
     )
     parser.add_argument(
-        "-d",
-        "--debug",
-        type=str2bool,
-        default=False,
+        "-d", "--debug", type=str2bool, default=False,
         help="enable post-mortem debugging",
     )
     parser.add_argument(
-        "-r",
-        "--resume",
-        type=str,
-        default="",
+        "-r", "--resume", type=str, default="",
         help="resume from logdir or checkpoint in logdir",
     )
+    parser.add_argument("--ckpt", default=None)
+    parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument(
-        "--ckpt",
-        default=None
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=None,
-    )
-    parser.add_argument(
-        "-s",
-        "--seed",
-        type=int,
-        default=23,
+        "-s", "--seed", type=int, default=23,
         help="seed for seed_everything",
     )
     parser.add_argument(
-        "-l",
-        "--logdir",
-        type=str,
-        default="logs",
+        "-l", "--logdir", type=str, default="logs",
         help="directory for logging dat shit",
     )
     parser.add_argument(
-        "--scale_lr",
-        type=str2bool,
-        nargs="?",
-        const=True,
-        default=False,
+        "--scale_lr", type=str2bool, nargs="?", const=True, default=False,
         help="scale base-lr by ngpu * batch_size * n_accumulate",
     )
-    parser.add_argument(
-        "--ngpu",
-        type=int,
-        default=None
-    )
-    parser.add_argument(
-        "--logger_freq",
-        type=int,
-        default=300
-    )
-    parser.add_argument(
-        "--sd_locked",
-        type=bool,
-        default=True
-    )
-    parser.add_argument(
-        "--only_mid_control",
-        type=bool,
-        default=False
-    )
+    parser.add_argument("--ngpu", type=int, default=None)
+    parser.add_argument("--logger_freq", type=int, default=300)
+    parser.add_argument("--sd_locked", type=bool, default=True)
+    parser.add_argument("--only_mid_control", type=bool, default=False)
 
-    # for generation
-    parser.add_argument("--save_mode", type=str, default="byvideo") # bybatch, byvideo, byframe
-    parser.add_argument("--test_verbose", type=bool, default=False)
-    parser.add_argument("--video_length", type=int, default=8)
+    # ===== for generation =====
+    # hyper parameters
     parser.add_argument("--ddim_step", type=int, default=50)
-    parser.add_argument("--total_sample_number", type=int, default=16)
+    parser.add_argument("--video_length", type=int, default=16)
     parser.add_argument("--unconditional_guidance_scale", type=float, default=9.0)
-    parser.add_argument("--dataset_root", type=str, default=None)
+    # sample settings
+    parser.add_argument("--suffix", type=str, default="")
     parser.add_argument("--cur_part", type=int, default=1)
     parser.add_argument("--total_part", type=int, default=1)
+    parser.add_argument("--dataset_root", type=str, default=None)
+    parser.add_argument("--test_verbose", type=bool, default=False)
+    parser.add_argument("--total_sample_number", type=int, default=16)
+    parser.add_argument("--save_mode", type=str, default="byvideo") # bybatch, byvideo, byframe
     parser.add_argument("--use_gauss_shift", type=bool, default=False)
     parser.add_argument("--gauss_shift_std", type=str, default=None)
     parser.add_argument("--gauss_shift_mean", type=str, default=None)

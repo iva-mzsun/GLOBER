@@ -2,24 +2,164 @@ import einops
 import torch
 import torch as th
 import torch.nn as nn
-
-from ldm.modules.diffusionmodules.util import (
-    conv_nd,
-    linear,
-    zero_module, timestep_embedding
-)
-
 from tqdm import tqdm
 from einops import rearrange, repeat
-from ldm.modules.diffusionmodules.openaimodel import UNetModel, TimestepEmbedSequential, ResBlock, \
-    Downsample, normalization, ResBlock2n
-from cldm.diffusion.ddpm_v3 import LatentDiffusion
-from ldm.util import log_txt_as_img, instantiate_from_config, default
-from ldm.models.diffusion.ddim import DDIMSampler
-from ldm.modules.distributions.distributions import DiagonalGaussianDistribution
-from cldm.utils.blocks import ResBlockwoEmb, TemporalAttentionBlock, SpatialAttentionBlock
 
-from ipdb import set_trace as st
+from ldm.models.diffusion.ddim import DDIMSampler
+from ldm.util import log_txt_as_img, instantiate_from_config, default
+from ldm.modules.distributions.distributions import DiagonalGaussianDistribution
+from ldm.modules.diffusionmodules.openaimodel import UNetModel, \
+    TimestepEmbedSequential, ResBlock, Downsample, normalization, ResBlock2n
+from ldm.modules.diffusionmodules.util import conv_nd, linear, \
+    zero_module, timestep_embedding
+
+from ldm_autoencoder.diffusion.ddpm_v1 import LatentDiffusion
+from ldm_autoencoder.utils.blocks import ResBlockwoEmb, TemporalAttentionBlock, \
+    SpatialAttentionBlock, SpatioTemporalAttentionBlock
+
+class Discriminator(nn.Module):
+    def __init__(
+        self,
+        image_size,
+        in_channels,
+        model_channels,
+        num_res_blocks,
+        attention_resolutions,
+        dropout=0,
+        channel_mult=(1, 2, 4, 8),
+        conv_resample=True,
+        dims=3,
+        use_checkpoint=False,
+        use_fp16=False,
+        num_heads=-1,
+        num_head_channels=-1,
+        num_heads_upsample=-1,
+        use_scale_shift_norm=False,
+        resblock_updown=False,
+        use_new_attention_order=False,
+        legacy=True,
+        temporal_embeddings=False
+    ):
+        super().__init__()
+        if num_heads_upsample == -1:
+            num_heads_upsample = num_heads
+
+        if num_heads == -1:
+            assert num_head_channels != -1, 'Either num_heads or num_head_channels has to be set'
+
+        if num_head_channels == -1:
+            assert num_heads != -1, 'Either num_heads or num_head_channels has to be set'
+
+        self.dims = dims
+        self.image_size = image_size
+        self.in_channels = in_channels
+        self.model_channels = model_channels
+        if isinstance(num_res_blocks, int):
+            self.num_res_blocks = len(channel_mult) * [num_res_blocks]
+        else:
+            if len(num_res_blocks) != len(channel_mult):
+                raise ValueError("provide num_res_blocks either as an int (globally constant) or "
+                                 "as a list/tuple (per-level) with the same length as channel_mult")
+            self.num_res_blocks = num_res_blocks
+
+        self.attention_resolutions = attention_resolutions
+        self.dropout = dropout
+        self.channel_mult = channel_mult
+        self.conv_resample = conv_resample
+        self.use_checkpoint = use_checkpoint
+        self.dtype = th.float16 if use_fp16 else th.float32
+        self.num_heads = num_heads
+        self.num_head_channels = num_head_channels
+        self.num_heads_upsample = num_heads_upsample
+
+        # temporal embeddings
+        # create learnable embeddings to distinguish pre/cur video frame
+        self.temporal_embed = temporal_embeddings
+        if temporal_embeddings:
+            shape = (1, in_channels, 2, image_size, image_size)
+            self.frame_embed = nn.Parameter(torch.randn(shape), requires_grad=True)
+
+        # create input blocks
+        self.input_blocks = nn.ModuleList([
+             conv_nd(dims, in_channels, model_channels, 3, padding=1)
+        ])
+        input_block_chans = [model_channels]
+        ds, ch = 1, model_channels
+        for level, mult in enumerate(channel_mult):
+            for nr in range(self.num_res_blocks[level]):
+                layers = [
+                    ResBlockwoEmb(
+                        ch,
+                        dropout,
+                        out_channels=mult * model_channels,
+                        use_checkpoint=use_checkpoint,
+                        use_scale_shift_norm=use_scale_shift_norm,
+                    )
+                ]
+                ch = mult * model_channels
+                if ds in attention_resolutions:
+                    if num_head_channels == -1:
+                        dim_head = ch // num_heads
+                    else:
+                        num_heads = ch // num_head_channels
+                        dim_head = num_head_channels
+                    if legacy:
+                        dim_head = num_head_channels
+
+                    layers.append(
+                        SpatioTemporalAttentionBlock(
+                            ch,
+                            use_checkpoint=use_checkpoint,
+                            num_heads=num_heads,
+                            num_head_channels=dim_head,
+                            use_new_attention_order=use_new_attention_order,
+                        )
+                    )
+                self.input_blocks.append(nn.Sequential(*layers))
+                input_block_chans.append(ch)
+            if level != len(channel_mult) - 1:
+                out_ch = ch
+                self.input_blocks.append(
+                    nn.Sequential(
+                        ResBlockwoEmb(
+                            ch,
+                            dropout,
+                            out_channels=out_ch,
+                            use_checkpoint=use_checkpoint,
+                            use_scale_shift_norm=use_scale_shift_norm,
+                            down=True,
+                        )
+                        if resblock_updown
+                        else Downsample(
+                            ch, conv_resample, out_channels=out_ch, dims=dims,
+                        )
+                    )
+                )
+                ch = out_ch
+                input_block_chans.append(ch)
+                ds *= 2
+
+        # obtain video content feature
+        self.out = nn.Sequential(
+            conv_nd(dims, ch, model_channels, 3, padding=1),
+            normalization(model_channels),
+            nn.SiLU(),
+            nn.AdaptiveAvgPool3d((1, 1, 1)),
+            nn.Flatten(), # B, C
+            nn.Linear(model_channels, 1)
+        )
+
+    def forward(self, x, **kwargs):
+        '''
+        x: [(b t), c, 2, h, w]
+        '''
+        h = x.type(self.dtype)
+        if self.temporal_embed:
+            h = h + self.frame_embed
+        for module in self.input_blocks:
+            h = module(h)
+        logit = self.out(h).squeeze(1)
+        return logit # B
 
 class VideoContentEnc(nn.Module):
     def __init__(
@@ -46,7 +186,6 @@ class VideoContentEnc(nn.Module):
         resblock_updown=False,
         use_new_attention_order=False,
         legacy=True,
-        learn_var=False,
     ):
         super().__init__()
         if num_heads_upsample == -1:
@@ -61,7 +200,7 @@ class VideoContentEnc(nn.Module):
         self.dims = dims
         self.image_size = image_size
         self.in_channels = in_channels
-        self.out_channels = out_channels
+        self.out_channels = out_channels * 2
         self.model_channels = model_channels
         if isinstance(num_res_blocks, int):
             self.num_res_blocks = len(channel_mult) * [num_res_blocks]
@@ -81,7 +220,6 @@ class VideoContentEnc(nn.Module):
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
         self.learnable_content = learnable_content
-        self.learn_var = learn_var
 
         # create learnable embedding
         if self.learnable_content:
@@ -164,13 +302,6 @@ class VideoContentEnc(nn.Module):
                 nn.SiLU(),
                 conv_nd(dims, self.out_channels, self.out_channels, 1)
             )
-            if self.learn_var:
-                self.out_vc_var = nn.Sequential(
-                    conv_nd(dims, ch, self.out_channels, 3, padding=1),
-                    normalization(self.out_channels),
-                    nn.SiLU(),
-                    zero_module(conv_nd(dims, self.out_channels, self.out_channels, 1))
-                )
         else:
             self.out_vc = nn.Sequential(
                 conv_nd(dims, ch, self.out_channels, 3, padding=1),
@@ -179,14 +310,6 @@ class VideoContentEnc(nn.Module):
                 nn.AdaptiveAvgPool3d((1, image_size // ds, image_size // ds)),
                 conv_nd(dims, self.out_channels, self.out_channels, 1)
             )
-            if self.learn_var:
-                self.out_vc_var = nn.Sequential(
-                    conv_nd(dims, ch, self.out_channels, 3, padding=1),
-                    normalization(self.out_channels),
-                    nn.SiLU(),
-                    nn.AdaptiveAvgPool3d((1, image_size // ds, image_size // ds)),
-                    zero_module(conv_nd(dims, self.out_channels, self.out_channels, 1))
-                )
 
         # embed index embed
         index_embed_dim = model_channels * 4
@@ -202,18 +325,18 @@ class VideoContentEnc(nn.Module):
             curds, n = ds, 0
             tards = sdinput_block_ds[i]
             if tards == ds:
-                layers = [ResBlock(self.out_channels, index_embed_dim, dropout, ch)]
+                layers = [ResBlock(out_channels, index_embed_dim, dropout, ch)]
             elif ds < tards:
                 while curds < tards:
                     n += 1
                     curds *= 2
-                layers = [ResBlock2n(self.out_channels, index_embed_dim,
+                layers = [ResBlock2n(out_channels, index_embed_dim,
                                      dropout, ch, down=True, sample_num=n)]
             else:
                 while curds > tards:
                     n += 1
                     curds /= 2
-                layers = [ResBlock2n(self.out_channels, index_embed_dim,
+                layers = [ResBlock2n(out_channels, index_embed_dim,
                                      dropout, ch, up=True, sample_num=n)]
             layers.append(self.make_zero_conv(ch, dims=2))
             self.output_blocks.append(TimestepEmbedSequential(*layers))
@@ -226,7 +349,6 @@ class VideoContentEnc(nn.Module):
         return nn.Sequential(zero_module(conv_nd(dims, channels, channels, 1, padding=0)))
 
     def encode(self, x):
-        # obtain vc
         if self.learnable_content:
             B, C, T, H, W = x.shape
             vc = repeat(self.video_content, 'c h w -> b c t h w', b=B, t=1)
@@ -235,24 +357,25 @@ class VideoContentEnc(nn.Module):
         for module in self.input_blocks:
             h = module(h)
         if self.learnable_content:
-            h_mean = self.out_vc(h)
-            vc_mean = h_mean[:, :, 0, :, :]  # B, C, H, W
-            h_std = self.out_vc_var(h)
-            vc_std = h_std[:, :, 0, :, :]
+            h = self.out_vc(h)
+            vc_moments = h[:, :, 0, :, :]  # B, C, H, W
         else:
-            vc_mean = self.out_vc(h)  # B, C, 1, H, W
-            vc_mean = vc_mean.squeeze(2)  # B, C, H, W
-            vc_std = self.out_vc_var(h)
-            vc_std = vc_std.squeeze(2)
-
-        vc_dist = torch.cat([vc_mean, vc_std], dim=1)
-        vc_dist = DiagonalGaussianDistribution(vc_dist)
-        return vc_dist
+            vc_moments = self.out_vc(h)  # B, C, 1, H, W
+            vc_moments = vc_moments.squeeze(2)  # B, C, H, W
+        vc_posterior = DiagonalGaussianDistribution(vc_moments)
+        return vc_posterior # [B, C * 2, H, W]
 
     def decode(self, vc, index):
-        if len(index.shape) == 2:
-            index = rearrange(index, 'b t -> (b t)')
+        """
+            vc: B, C, H, W
+            index: B, T
+        """
+        # resize vc
+        B, T = index.shape
+        vc = repeat(vc, 'b c h w -> b c t h w', t=T)
+        vc = rearrange(vc, 'b c t h w -> (b t) c h w')
         # obtain index embedding
+        index = rearrange(index, 'b t -> (b t)').to(vc.device)
         index_emb = timestep_embedding(index, self.model_channels)
         index_emb = self.index_embed(index_emb)
         # obtain insert feat
@@ -260,54 +383,21 @@ class VideoContentEnc(nn.Module):
         for module in self.output_blocks:
             vc_feat = module(vc, index_emb)
             vc_feats.append(vc_feat)
-
         return vc_feats
 
     def forward(self, x, index, is_training=False, **kwargs):
         '''
-        x: [b, c, t, h, w]
-        ind: [b]
+            x: [b, c, t, h, w]
+            ind: [b, t]
         '''
-        # obtain vc
-        if self.learnable_content:
-            B, C, T, H, W = x.shape
-            vc = repeat(self.video_content, 'c h w -> b c t h w', b=B, t=1)
-            x = torch.cat([vc, x], dim=2)
-        h = x.type(self.dtype)
-        for module in self.input_blocks:
-            h = module(h)
-
-        if self.learnable_content:
-            h_mean = self.out_vc(h)
-            vc_mean = h_mean[:, :, 0, :, :] # B, C, H, W
-            if self.learn_var:
-                h_std = self.out_vc_var(h)
-                vc_std = h_std[:, :, 0, :, :]
+        vc_posterior = self.encode(x)
+        if is_training is True:
+            vc = vc_posterior.sample()
+            kl_loss = vc_posterior.kl()
         else:
-            vc_mean = self.out_vc(h) # B, C, 1, H, W
-            vc_mean = vc_mean.squeeze(2) # B, C, H, W
-            if self.learn_var:
-                vc_std = self.out_vc_var(h)
-                vc_std = vc_std.squeeze(2)
-
-        if self.learn_var and is_training is True:
-            vc_dist = torch.cat([vc_mean, vc_std], dim=1)
-            vc_dist = DiagonalGaussianDistribution(vc_dist)
-            vc = vc_dist.sample()
-            kl_loss = vc_dist.kl()
-        else:
-            vc = vc_mean
+            vc = vc_posterior.mode()
             kl_loss = None
-
-        # obtain index embedding
-        index_emb = timestep_embedding(index, self.model_channels)
-        index_emb = self.index_embed(index_emb)
-        # obtain insert feat
-        vc_feats = []
-        for module in self.output_blocks:
-            vc_feat = module(vc, index_emb)
-            vc_feats.append(vc_feat)
-
+        vc_feats = self.decode(vc, index)
         return vc_feats, kl_loss
 
 class AEUnetModel(UNetModel):
@@ -337,7 +427,8 @@ class AutoEncLDM(LatentDiffusion):
                  videoenc_config, videocontent_key,
                  frame_index_key, optimize_params_key,
                  sd_lock_output, sd_lock_input, sd_lock_middle,
-                 kl_loss_weight=1e-6, optimizer="adam", *args, **kwargs):
+                 allow_gan, gan_config, kl_loss_weight=1e-6,
+                 optimizer="adam", *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.optimizer = optimizer
         self.sd_lock_input = sd_lock_input
@@ -352,8 +443,114 @@ class AutoEncLDM(LatentDiffusion):
         self.videocontent_enc = instantiate_from_config(videoenc_config)
         # obtain target video frame indexes
         self.frame_index_key = frame_index_key
+        # initialize gan configs
+        self.allow_gan = allow_gan
+        if allow_gan:
+            assert gan_config is not None
+            self.init_gan_configs(gan_config)
 
-    def p_losses(self, x_start, cond, t, noise=None, is_training=False):
+    def init_gan_configs(self, cfg):
+        if cfg.adversarial_loss == "hinge":
+            from ldm_autoencoder.utils.gan_loss import hinge_d_loss
+            self.adversarial_loss = hinge_d_loss
+        else:
+            raise NotImplementedError
+        self.generator_frequency = cfg.generator_frequency
+        self.discriminator_frequency = cfg.discriminator_frequency
+        self.generator_loss_weight = cfg.generator_loss_weight
+        self.discriminator = instantiate_from_config(cfg.discriminator)
+
+    def obtain_disc_label(self, batch, realx, fakex, optimizer_idx):
+        ''' Ensure indexes of inputs are sorted!!!
+        realx/fakex: [B * T, C, H, W]
+        '''
+        B, T = batch[self.frame_index_key].shape
+        realx = rearrange(realx, '(b t) c h w -> b c t h w', b=B, t=T)
+        fakex = rearrange(fakex, '(b t) c h w -> b c t h w', b=B, t=T)
+        real0 = realx[:, :, :1, :, :] # B, C, 1, H, W
+        fake0 = fakex[:, :, :1, :, :]  # B, C, 1, H, W
+        real1 = realx[:, :, -1:, :, :]  # B, C, 1, H, W
+        fake1 = fakex[:, :, -1:, :, :]  # B, C, 1, H, W
+
+        samples, labels = [], []
+        if optimizer_idx == 0:  # train generator
+            # True samples:
+            samples.append(torch.cat([real0, fake1], dim=2))
+            labels.append(torch.ones(B).to(self.dtype))
+            samples.append(torch.cat([fake0, real1], dim=2))
+            labels.append(torch.ones(B).to(self.dtype))
+            samples.append(torch.cat([fake0, fake1], dim=2))
+            labels.append(torch.ones(B).to(self.dtype))
+        elif optimizer_idx == 1: # train discriminator
+            # TRUE samples:
+            samples.append(torch.cat([real0, real1], dim=2))
+            labels.append(torch.ones(B).to(self.dtype))
+            # False samples:
+            samples.append(torch.cat([real0, fake1], dim=2))
+            labels.append(torch.zeros(B).to(self.dtype))
+            samples.append(torch.cat([fake0, real1], dim=2))
+            labels.append(torch.zeros(B).to(self.dtype))
+            samples.append(torch.cat([fake0, fake1], dim=2))
+            labels.append(torch.zeros(B).to(self.dtype))
+            samples.append(torch.cat([real1, real0], dim=2))
+            labels.append(torch.zeros(B).to(self.dtype))
+            samples.append(torch.cat([fake1, fake0], dim=2))
+            labels.append(torch.zeros(B).to(self.dtype))
+        # concate all samples
+        samples = torch.cat(samples, dim=0) # (b * 3 or 4) c 2 h w
+        labels = torch.cat(labels, dim=0).to(samples.device) # (b * 3 or 4)
+        return samples, labels
+
+    def training_step(self, batch, batch_idx, optimizer_idx=None):
+        if self.allow_gan:
+            return self.training_step_wgan(batch, batch_idx, optimizer_idx)
+        else:
+            return self.training_step_wogan(batch, batch_idx)
+
+    def training_step_wogan(self, batch, batch_idx):
+        return super().training_step(batch, batch_idx)
+
+    def training_step_wgan(self, batch, batch_idx, optimizer_idx):
+        for k in self.ucg_training:
+            p = self.ucg_training[k]["p"]
+            val = self.ucg_training[k]["val"]
+            if val is None:
+                val = ""
+            for i in range(len(batch[k])):
+                if self.ucg_prng.choice(2, p=[1 - p, p]):
+                    batch[k][i] = val
+
+        if optimizer_idx == 0:
+            loss, loss_dict, x_start, x_recon = self.shared_step(batch, is_training=True, returnx=True)
+            # log lr and custom losses
+            lr = self.optimizers()[optimizer_idx].param_groups[0]['lr']
+            self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
+            self.log_dict(loss_dict, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            self.log("global_step", self.global_step, prog_bar=True, logger=True, on_step=True, on_epoch=False)
+            # obtain temporal discriminator results
+            for p in self.discriminator.parameters():
+                p.requires_grad = True
+            samplex, labels = self.obtain_disc_label(batch, x_start, x_recon, 0)
+            logits = self.discriminator(samplex)
+            g_loss = self.adversarial_loss(logits, labels)
+            self.log("train/g_loss", g_loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            return loss + g_loss * self.generator_loss_weight
+
+        if optimizer_idx == 1: # train discriminator
+            with torch.no_grad():
+                loss, _, x_start, x_recon = self.shared_step(batch, is_training=True, returnx=True)
+                x_start, x_recon = x_start.detach(), x_recon.detach()
+            # obtain spatial discriminator results
+            samplex, labels = self.obtain_disc_label(batch, x_start, x_recon, 1)
+            logits = self.discriminator(samplex)
+            d_loss = self.adversarial_loss(logits, labels)
+            # log
+            lr = self.optimizers()[optimizer_idx].param_groups[0]['lr']
+            self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
+            self.log("train/d_loss", d_loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            return d_loss
+
+    def p_losses(self, x_start, cond, t, noise=None, is_training=False, returnx=False):
         loss_dict = {}
         prefix = 'train' if self.training else 'val'
 
@@ -396,12 +593,22 @@ class AutoEncLDM(LatentDiffusion):
             loss += kl_loss.mean() * self.kl_loss_weight
             loss_dict.update({f'{prefix}/kl_loss': kl_loss.mean()})
 
+        if returnx:
+            if self.parameterization == "eps":
+                x_recon = self.predict_start_from_noise(x_noisy, t=t,
+                                                        noise=model_output)
+            elif self.parameterization == "x0":
+                x_recon = model_output
+            else:
+                raise NotImplementedError()
+            return loss, loss_dict, x_start, x_recon
         return loss, loss_dict
 
     @torch.no_grad()
-    def get_input(self, batch, k, bs=None, *args, **kwargs):
+    def get_input(self, batch, k, bs=None, repeat_c_by_T=True, *args, **kwargs):
         x, c = super().get_input(batch, self.first_stage_key,
-                                     *args, **kwargs) # x: [b c h w], c: [b c]
+                                 repeat_c_by_T=repeat_c_by_T,
+                                 bs=bs, *args, **kwargs) # x: [b c h w], c: [b c]
         # encode full video frames
         vidcontent = batch[self.videocontent_key].to(self.device)
         if self.use_fp16:
@@ -425,9 +632,8 @@ class AutoEncLDM(LatentDiffusion):
         diffusion_model = self.model.diffusion_model
         cond_txt = torch.cat(cond['c_crossattn'], 1) # b, l, c
         cond_vc = torch.cat(cond['c_video'], 2) # b, c, t, h, w
-        cond_index = cond['c_index'][0] # b
+        cond_index = cond['c_index'][0] # b, t
         # cond_index = torch.cat(cond['c_index'], 1) # b, 1
-
         vc_feats, kl_loss = self.videocontent_enc(x=cond_vc, index=cond_index,
                                                   is_training=is_training)
         eps = diffusion_model(x=x_noisy, vc_feats=vc_feats, timesteps=t, context=cond_txt)
@@ -487,22 +693,23 @@ class AutoEncLDM(LatentDiffusion):
         return log
 
     @torch.no_grad()
-    def log_videos(self, batch, N=2, n_frames=4, sample=False, ddim_steps=50, ddim_eta=0.0,
+    def log_videos(self, batch, N=2, n_frames=4, sample=True, ddim_steps=50, ddim_eta=0.0,
                    verbose=False, unconditional_guidance_scale=9.0, **kwargs):
-        B = batch[self.frame_index_key].shape[0]
+        B, T = batch[self.frame_index_key].shape
         N = min(B, N)
         # obtain inputs
         use_ddim = ddim_steps is not None
-        z, cond = self.get_input(batch, self.first_stage_key, bs=N)
+        z, cond = self.get_input(batch, self.first_stage_key,
+                                 bs=N, repeat_c_by_T=False)
         td = tqdm(range(n_frames))
         # obtain conditions
-        vc = cond["c_video"][0][:N]
-        ind = cond["c_index"][0][:N]
-        c = cond["c_crossattn"][0][:N]
+        vc = cond["c_video"][0] # B, C, T, H, W
+        ind = cond["c_index"][0][:, :1] # B, 1
+        c = cond["c_crossattn"][0]
         new_cond = {"c_video": [vc], "c_crossattn": [c]}
         # obtain logs
         log = dict()
-        log["reconstruction"] = self.decode_first_stage(z[:N])
+        log["reconstruction"] = self.decode_first_stage(z)
         log['full_frames'] = rearrange(batch[self.videocontent_key].to(self.device),
                                        'b c t h w -> b c h (t w)')
         # start sampling
@@ -516,7 +723,7 @@ class AutoEncLDM(LatentDiffusion):
                                             ddim_steps=ddim_steps, eta=ddim_eta, verbose=verbose)
                 samples.append(self.decode_first_stage(frames).unsqueeze(1))
             x_samples = torch.cat(samples, dim=1) # b, t, c, h, w
-            x_samples = rearrange(x_samples, 'b t c h w -> (b t) c h w')
+            x_samples = rearrange(x_samples, 'b t c h w -> b c t h w')
             log["samples"] = x_samples
 
         if unconditional_guidance_scale > 0.0:
@@ -532,47 +739,43 @@ class AutoEncLDM(LatentDiffusion):
                                                ddim_steps=ddim_steps, eta=ddim_eta, verbose=verbose,
                                                unconditional_conditioning=uc_cond,
                                                unconditional_guidance_scale=unconditional_guidance_scale)
-                samples_ug.append(self.decode_first_stage(frames_ug).unsqueeze(1))
+                curframe = self.decode_first_stage(frames_ug).unsqueeze(1)
+                samples_ug.append(curframe)
             x_samples_ug = torch.cat(samples_ug, dim=1)  # b, t, c, h, w
-            x_samples_ug = rearrange(x_samples_ug, 'b t c h w -> b c h (t w)')
+            x_samples_ug = rearrange(x_samples_ug, 'b t c h w -> b c t h w')
             log[f"samples_ug_scale_{unconditional_guidance_scale:.2f}"] = x_samples_ug
         return log
 
     @torch.no_grad()
-    def sample_log(self, cond, batch_size, ddim, ddim_steps, **kwargs):
+    def sample_log(self, cond, batch_size, ddim, ddim_steps, verbose=False, **kwargs):
         ddim_sampler = DDIMSampler(self)
         shape = (self.channels, self.image_size, self.image_size)
-        samples, intermediates = ddim_sampler.sample(ddim_steps, batch_size, shape, cond, **kwargs)
+        samples, intermediates = ddim_sampler.sample(ddim_steps, batch_size, shape,
+                                                     cond, verbose=verbose, **kwargs)
         return samples, intermediates
 
     def configure_optimizers(self):
+        if self.allow_gan:
+            return self.configure_optimizers_wgan()
+        else:
+            return self.configure_optimizers_wogan()
+
+    def configure_optimizers_wogan(self):
         lr = self.learning_rate
         params = list(self.videocontent_enc.parameters())
 
         # add select params
-        if self.optimize_params_key is not None:
-            for n, p in self.model.diffusion_model.named_parameters():
+        for n, p in self.model.diffusion_model.named_parameters():
+            flag = False
+            if self.optimize_params_key is not None:
                 for key in self.optimize_params_key:
-                    if key in n:
-                        print("Add optimize parameters: ", n)
-                        params.append(p)
-
-        # Judge if optimize blocks of stable diffusion
-        if not self.sd_lock_input:
-            print("Add optimize parameters: \n",
-                  list(self.model.diffusion_model.input_blocks.parameters()))
-            params += list(self.model.diffusion_model.input_blocks.parameters())
-        if not self.sd_lock_middle:
-            print("Add optimize parameters: \n",
-                  list(self.model.diffusion_model.middle_block.parameters()))
-            params += list(self.model.diffusion_model.middle_block.parameters())
-        if not self.sd_lock_output:
-            print("Add optimize parameters: \n",
-                  list(self.model.diffusion_model.output_blocks.parameters()))
-            print("Add optimize parameters: \n",
-                  list(self.model.diffusion_model.out.parameters()))
-            params += list(self.model.diffusion_model.output_blocks.parameters())
-            params += list(self.model.diffusion_model.out.parameters())
+                    flag = True if key in n else flag
+            flag = flag or (n[:5] == "input" and not self.sd_lock_input)
+            flag = flag or (n[:3] == "out" and not self.sd_lock_output)
+            flag = flag or (n[:6] == "middle" and not self.sd_lock_middle)
+            if flag:
+                print("Add optimize parameters: ", n)
+                params.append(p)
 
         # count total params to optimize
         optimize_params = 0
@@ -600,6 +803,51 @@ class AutoEncLDM(LatentDiffusion):
                 }]
             return [opt], scheduler
         return opt
+
+    def configure_optimizers_wgan(self):
+        lr = self.learning_rate
+        # == parameters of generator ==
+        g_params = list(self.videocontent_enc.parameters())
+        # add select params
+        for n, p in self.model.diffusion_model.named_parameters():
+            flag = False
+            if self.optimize_params_key is not None:
+                for key in self.optimize_params_key:
+                    flag = True if key in n else flag
+            flag = flag or (n[:5] == "input" and not self.sd_lock_input)
+            flag = flag or (n[:3] == "out" and not self.sd_lock_output)
+            flag = flag or (n[:6] == "middle" and not self.sd_lock_middle)
+            if flag:
+                print("Add optimize parameters: ", n)
+                g_params.append(p)
+
+        # == parameters of discriminator ==
+        d_params = []
+        d_params += list(self.discriminator.parameters())
+        assert len(d_params) != 0
+
+        # == count total params to optimize ==
+        optimize_params = 0
+        for param in g_params + d_params:
+            optimize_params += param.numel()
+        print(f"NOTE!!! {optimize_params/1e6:.3f}M params to optimize in TOTAL!!!")
+
+        if self.optimizer == "hybridadam":
+            raise NotImplementedError
+        else:
+            print("Load AdamW optimizer.")
+            opt_g = torch.optim.AdamW(g_params, lr=lr)
+            opt_d = torch.optim.AdamW(d_params, lr=lr)
+
+        if self.generator_frequency is None or self.discriminator_frequency is None:
+            print(f"- NOTE: Train without FREQUENCY!")
+            return [opt_g, opt_d]
+        else:
+            print(f"- NOTE: Train with FREQUENCY g{self.generator_frequency}/d{self.discriminator_frequency}!")
+            return (
+                {'optimizer': opt_g, 'frequency': self.generator_frequency},
+                {'optimizer': opt_d, 'frequency': self.discriminator_frequency}
+            )
 
     def low_vram_shift(self, is_diffusing):
         if is_diffusing:

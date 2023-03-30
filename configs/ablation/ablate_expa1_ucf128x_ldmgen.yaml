@@ -1,0 +1,187 @@
+model:
+  base_learning_rate: 1e-4
+  target: ldm_generator.ldm_generator_v1.Generator_LDM
+  params:
+    linear_start: 0.00085
+    linear_end: 0.0120
+    num_timesteps_cond: 1
+    log_every_t: 200
+    timesteps: 1000
+    image_size: 16
+    channels: 4
+    cond_stage_trainable: false
+    conditioning_key: crossattn
+    monitor: val/loss_simple_ema
+    scale_factor: 0.18215
+    use_ema: False
+    learn_logvar: False
+    videocontent_key: "full_frame"
+    validation_log_start_epoch: 0
+    validation_log_every_epochs: 20
+
+    vc_size: 8
+    vc_channels: 64
+    latent_size: 16
+    latent_channels: 4
+
+    diffusion_config:
+      target: ldm_generator.diffusion.dit_model.DiT_crossattn
+      params:
+        use_fp16: True
+        input_size: 8 # according to vc shape
+        patch_size: 1
+        in_channels: 64 # according to vc shape
+        hidden_size: 1152
+        depth: 28
+        num_heads: 16
+        mlp_ratio: 4
+        learn_sigma: False
+
+    first_stage_key: "tar_frames" # current video frames
+    first_stage_config:
+      target: ldm.models.autoencoder.AutoencoderKL
+      params:
+        ckpt_path: models/autoencoderkl.pth
+        embed_dim: 4
+        monitor: val/rec_loss
+        ddconfig:
+          double_z: true
+          z_channels: 4
+          resolution: 256
+          in_channels: 3
+          out_ch: 3
+          ch: 128
+          ch_mult:
+          - 1
+          - 2
+          - 4
+          - 4
+          num_res_blocks: 2
+          attn_resolutions: []
+          dropout: 0.0
+        lossconfig:
+          target: torch.nn.Identity
+
+    cond_stage_key: "txt"
+    cond_stage_config:
+      target: ldm.modules.encoders.modules.FrozenCLIPEmbedder
+
+    stable_ae_config:
+      target: ldm_generator.wrapper.StableAutoencoder
+      params:
+        linear_start: 0.00085
+        linear_end: 0.0120
+        log_every_t: 200
+        timesteps: 1000
+        image_size: 16
+        channels: 4
+        conditioning_key: crossattn
+        use_ema: False
+        learn_logvar: False
+        enc_cfg: # i.e. videoenc_config in ldmae.yaml
+          target: ldm_autoencoder.ldm_autoencoder_v1.VideoContentEnc
+          params:
+            dims: 3
+            image_size: 16
+            in_channels: 4
+            out_channels: 64 # vc shape: [ 8, 8, 64 ]
+            model_channels: 320
+            num_res_blocks: 4
+            learnable_content: True
+            attention_resolutions: [ 1, 2 ]
+            channel_mult: [ 1, 2 ]
+            num_head_channels: 64
+            use_checkpoint: True
+            legacy: False
+        diffusion_config: # i.e. unet_config in ldmae.yaml
+          target: ldm_autoencoder.ldm_autoencoder_v1.AEUnetModel
+          params:
+            image_size: 16 # unused
+            in_channels: 4
+            out_channels: 4
+            model_channels: 320
+            attention_resolutions: [ 4, 2, 1 ]
+            num_res_blocks: 2
+            channel_mult: [ 1, 2, 4, 4 ]
+            num_heads: 8
+            use_spatial_transformer: True
+            transformer_depth: 1
+            context_dim: 768
+            use_checkpoint: True
+            legacy: False
+        decode_sample_cfg:
+          use_ddim: True
+          ddim_steps: 50
+          ddim_eta: 0.0
+          unconditional_guidance_scale: 3.0
+        ckpt_path: experiments/2023-03-29T03-06-04_ablate_expa1_ucf128x_ldmae/checkpoints/last.ckpt
+
+data:
+  target: main.DataModuleFromConfig
+  params:
+    wrap: False
+    batch_size: 96 # TODO
+    num_workers: 8
+    train:
+      target: data.custom.VideoFolderDataset_AEwT
+      params:
+        size: 128
+        flip_p: 0.5
+        num_frames: 2
+        sort_index: True
+        content_frame_idx:
+          - 0
+          - 5
+          - 10
+          - 15
+        full_video_length: 16
+        root: /raid/72_datasets/ucf101/trainval_32fps
+    validation:
+      target: data.custom.VideoFolderDataset_AEwT
+      params:
+        size: 128
+        num_frames: 2
+        sort_index: True
+        allow_flip: False
+        allow_point: False
+        content_frame_idx:
+          - 0
+          - 5
+          - 10
+          - 15
+        full_video_length: 16
+        root: /raid/72_datasets/ucf101/ucf101_fps32_test2048_wclasses
+
+lightning:
+  trainer:
+    ckpt_load_strict: False
+    accelerator: 'gpu'
+    devices: 2
+    log_gpu_memory: all
+    max_epochs: 1000
+    precision: 16
+    auto_select_gpus: False
+    strategy:
+      target: strategies.DDPStrategy
+      params:
+        find_unused_parameters: True
+    log_every_n_steps: 2
+    logger: True
+    default_root_dir: "experiments/"
+
+  callbacks:
+    image_logger:
+      target: main.ImageLogger
+      params:
+        log_imgs: True
+
+  logger:
+    wandb:
+      target: lightning.pytorch.loggers.WandbLogger
+      params:
+          project: control
+          group: ucf101
+          name: nowname
+          save_dir: "experiments/"
+          offline: opt.debug
+          id: nowname

@@ -1,6 +1,6 @@
 model:
-  base_learning_rate: 5e-5
-  target: cldm.ldmae_v7.AutoEncLDM
+  base_learning_rate: 1e-4
+  target: ldm_autoencoder.ldm_autoencoder_v1.AutoEncLDM
   params:
     kl_loss_weight: 0.000001
     sd_lock_input: False
@@ -14,14 +14,16 @@ model:
     timesteps: 1000
     cond_stage_key: "txt"
     frame_index_key: "frame_index"
-    image_size: 32
+    image_size: 16
     channels: 4
     cond_stage_trainable: false
     conditioning_key: crossattn
-#    monitor: val/loss_simple_ema
+    monitor: val/loss_simple_ema
     scale_factor: 0.18215
     use_ema: False
     learn_logvar: False
+    validation_log_start_epoch: 500
+    validation_log_every_epochs: 10
 
     scheduler_config: # 10000 warmup steps
       target: ldm.lr_scheduler.LambdaLinearScheduler
@@ -34,28 +36,15 @@ model:
 
     allow_gan: True
     gan_config:
-      generator_frequency: 2
-      discriminator_frequency: 1
+      generator_frequency: ~
+      discriminator_frequency: ~
       adversarial_loss: hinge
       generator_loss_weight: 0.1
-      spatial_discriminator:
-        target: cldm.ldmae_v7.Discriminator
+      discriminator:
+        target: ldm_autoencoder.ldm_autoencoder_v1.Discriminator
         params:
           dims: 3
-          image_size: 32
-          in_channels: 4
-          model_channels: 256
-          num_res_blocks: 1
-          attention_resolutions: [ 2, 4, 8, 16 ]
-          channel_mult: [ 1, 1, 2, 2, 2 ]
-          num_head_channels: 32
-          use_checkpoint: True
-          legacy: False
-      temporal_discriminator:
-        target: cldm.ldmae_v7.Discriminator
-        params:
-          dims: 3
-          image_size: 32
+          image_size: 16
           in_channels: 4
           model_channels: 256
           num_res_blocks: 1
@@ -68,25 +57,25 @@ model:
 
     videocontent_key: "full_frame"
     videoenc_config:
-      target: cldm.ldmae_v7.VideoContentEnc
+      target: ldm_autoencoder.ldm_autoencoder_v1.VideoContentEnc
       params:
         dims: 3
-        image_size: 32
+        image_size: 16
         in_channels: 4
-        out_channels: 16
+        out_channels: 32 # vc shape: [ 16, 16, 32 ]
         model_channels: 320
-        num_res_blocks: 2
+        num_res_blocks: 8
         learnable_content: True
-        attention_resolutions: [ 1, 2 ]
-        channel_mult: [ 1, 2]
+        attention_resolutions: [ 1 ]
+        channel_mult: [ 1 ]
         num_head_channels: 64
         use_checkpoint: True
         legacy: False
 
     unet_config:
-      target: cldm.ldmae_v7.AEUnetModel
+      target: ldm_autoencoder.ldm_autoencoder_v1.AEUnetModel
       params:
-        image_size: 32 # unused
+        image_size: 16 # unused
         in_channels: 4
         out_channels: 4
         model_channels: 320
@@ -109,7 +98,7 @@ model:
         ddconfig:
           double_z: true
           z_channels: 4
-          resolution: 256
+          resolution: 128
           in_channels: 3
           out_ch: 3
           ch: 128
@@ -132,47 +121,43 @@ data:
   params:
     wrap: False
 #    batch_size: 2 # For debug
-    batch_size: 24
-    num_workers: 4
+    batch_size: 256
+    num_workers: 8
     train:
-      target: cldm.data.custom.VideoFolderDataset_AEwT
+      target: data.custom.VideoFolderDataset_AEwT
       params:
-        size: 256
+        size: 128
         flip_p: 0.5
         num_frames: 2
         sort_index: True
-#        max_data_num: 48 # For debug
         content_frame_idx:
           - 0
-          - 31
-          - 63
-          - 95
-        full_video_length: 96
-        fix_prompt: "time-lapse video of sky"
-        root: datasets/SkyTimelapse/sky_timelapse/reorganized_frames/train/FPS32
+          - 5
+          - 10
+          - 15
+        full_video_length: 16
+        root: /raid/72_datasets/ucf101/trainval_32fps
     validation:
-      target: cldm.data.custom.VideoFolderDataset_AEwT
+      target: data.custom.VideoFolderDataset_AEwT
       params:
-        size: 256
+        size: 128
         num_frames: 2
         sort_index: True
-#        max_data_num: 48 # for debug
         allow_flip: False
         allow_point: False
         content_frame_idx:
           - 0
-          - 31
-          - 63
-          - 95
-        full_video_length: 96
-        fix_prompt: "time-lapse video of sky"
-        root: datasets/SkyTimelapse/sky_timelapse/reorganized_frames/train/FPS32
+          - 5
+          - 10
+          - 15
+        full_video_length: 16
+        root: /raid/72_datasets/ucf101/ucf101_fps32_test2048_wclasses
 
 lightning:
   trainer:
     ckpt_load_strict: False
     accelerator: 'gpu'
-    devices: 4
+    devices: 2
     log_gpu_memory: all
     max_epochs: 500
     precision: 16
@@ -182,7 +167,7 @@ lightning:
       params:
         find_unused_parameters: True
 
-    log_every_n_steps: 1
+    log_every_n_steps: 2
     logger: True
     default_root_dir: "experiments/"
 
@@ -190,7 +175,7 @@ lightning:
     image_logger:
       target: main.ImageLogger
       params:
-        log_imgs: False
+        log_imgs: True
 
   logger:
     wandb:

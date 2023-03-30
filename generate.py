@@ -84,6 +84,7 @@ if __name__ == "__main__":
     else:
         sampledir = os.path.join(logdir, f'samples-{opt.save_mode}-ucgs{opt.unconditional_guidance_scale}-'
                                          f'{os.path.basename(ckpt).split(".")[0]}')
+    sampledir = sampledir + opt.suffix
     os.makedirs(sampledir, exist_ok=True)
     seed_everything(opt.seed)
 
@@ -150,15 +151,13 @@ if __name__ == "__main__":
             else:
                 cur_video = sample_log[f"samples_ug_scale_{unconditional_guidance_scale:.2f}"]
             cur_video = cur_video.detach().cpu() # b c t h w
-            if len(cur_video.shape) == 4: # b c h tw
-                cur_video = rearrange(cur_video, 'b c h (t w) -> b c t h w', t=video_length)
             if save_mode == "bybatch":
-                save = tensor2img(rearrange(cur_video, 'b c t h w -> c (b h) (t w)'))
+                save = tensor2img(cur_video)
                 save.save(os.path.join(sampledir, f"{batch_idx:04d}.jpg"))
             elif save_mode == "byvideo":
                 video_names = batch['video_name']
                 for b, name in enumerate(video_names):
-                    save = tensor2img(cur_video[b])
+                    save = tensor2img(cur_video[b].unsqueeze(0))
                     video_name = f"b{batch_idx:04d}{b:02d}-v{name}-s{opt.seed}"
                     save.save(os.path.join(sampledir, f"{video_name}.jpg"))
             elif save_mode == "byframe":
@@ -167,9 +166,8 @@ if __name__ == "__main__":
                     video_name = f"b{batch_idx:04d}{b:02d}-v{name}-s{opt.seed}"
                     save_path = os.path.join(sampledir, video_name)
                     os.makedirs(save_path, exist_ok=True)
-                    sample = rearrange(cur_video[b], 'c t h w -> t c h w')
                     for t in range(video_length):
-                        frame = tensor2img(sample[t])
+                        frame = tensor2img(cur_video[b, :, t, :, :])
                         frame.save(os.path.join(save_path, f"{t:04d}.jpg"))
             else:
                 raise NotImplementedError

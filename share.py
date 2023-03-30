@@ -1,5 +1,5 @@
 import config
-from cldm.utils.hack import disable_verbosity, enable_sliced_attention
+from ldm_autoencoder.utils.hack import disable_verbosity, enable_sliced_attention
 
 
 disable_verbosity()

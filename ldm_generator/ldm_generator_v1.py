@@ -9,14 +9,11 @@ from tqdm import tqdm
 from einops import rearrange, repeat
 from ldm_generator.diffusion.ddim import DDIMSampler
 from ldm_generator.diffusion.ddpm import LatentDiffusion
-from ldm.util import log_txt_as_img, default, \
-    instantiate_from_config, load_state_dict
-from ldm_generator.wrapper import StableAutoencoder
+from ldm.util import instantiate_from_config
 
 from ipdb import set_trace as st
 
 class Generator_LDM(LatentDiffusion):
-
     def __init__(self,
                  stable_ae_config,
                  videocontent_key,
@@ -31,6 +28,7 @@ class Generator_LDM(LatentDiffusion):
         self.optimizer = optimizer
         self.videocontent_key = videocontent_key
 
+        # video auto encoder
         self.stable_ae = instantiate_from_config(stable_ae_config)
         for p in self.stable_ae.parameters():
             p.requires_grad = False
@@ -45,7 +43,7 @@ class Generator_LDM(LatentDiffusion):
         else:
             vidcontent = vidcontent.to(memory_format=torch.contiguous_format).float()
         T = vidcontent.shape[2]
-        vidcontent = einops.rearrange(vidcontent, 'b c t h w -> (b t) c h w')
+        vidcontent = rearrange(vidcontent, 'b c t h w -> (b t) c h w')
         vidcontent = self.encode_first_stage(vidcontent)
         vidcontent = self.get_first_stage_encoding(vidcontent).detach()
         vidcontent = rearrange(vidcontent, '(b t) c h w -> b c t h w', t=T)
@@ -59,16 +57,13 @@ class Generator_LDM(LatentDiffusion):
         return self.get_learned_conditioning([""] * N)
 
     @torch.no_grad()
-    def decode_vc(self, vc, video_length, context, uc_context, **kwargs):
-        batch_size = vc.shape[0]
-        shape = (self.latent_channels, self.latent_size, self.latent_size)
-
+    def decode_vc(self, vc, video_length, context, uc_context, verbose=False):
         video_sample = []
         # for index in tqdm(range(video_length), desc=f"Decoding video frames..."):
         for index in range(video_length):
-            ind = torch.ones(batch_size).unsqueeze(1).to(vc.dtype).to(vc.device) * index / video_length
-            frame_sample = self.stable_ae.decode(vc, index=ind, context=context, batch_size=batch_size,
-                                                 shape=shape, uc_context=uc_context, **kwargs)
+            ind = torch.ones(vc.shape[0]).unsqueeze(1).to(vc.dtype).to(vc.device) * index / video_length
+            frame_sample = self.stable_ae.decode(vc, index=ind, context=context,
+                                                 uc_context=uc_context, verbose=verbose)
             frame = self.decode_first_stage(frame_sample) # b, c, h, w
             frame = frame.unsqueeze(2)
             video_sample.append(frame)
@@ -76,54 +71,48 @@ class Generator_LDM(LatentDiffusion):
         return cur_video
 
     @torch.no_grad()
-    def log_videos(self, batch, N=8, n_frames=4, sample=True, ddim_steps=50, ddim_eta=0.0,
+    def log_videos(self, batch, N=8, x_T=None, n_frames=4, sample=True, ddim_steps=50, ddim_eta=0.0,
                    verbose=False, unconditional_guidance_scale=3.0, **kwargs):
-        B = batch[self.videocontent_key].shape[0]
-        N = min(B, N)
-        # obtain inputs
+        N = min(batch[self.videocontent_key].shape[0], N)
+        # obtain inputs & conditions
         use_ddim = ddim_steps is not None
         vc, cond = self.get_input(batch, self.first_stage_key, bs=N)
         # obtain conditions
-        vc = vc[:N]
-        context = cond["c_crossattn"][0][:N]
+        context = cond["c_crossattn"][0]
         uc_context = self.get_unconditional_conditioning(N)
-        new_cond = {"c_crossattn": [uc_context]}
-        # obtain logs
+        # shared kwargs
+        ddim_kwargs = {"use_ddim": use_ddim, "ddim_steps": ddim_steps, "ddim_eta": ddim_eta}
+        decode_vc_kwargs = {"video_length": n_frames, "context": context, "uc_context": uc_context}
+        # decode video content & visualize input full video frames
         log = dict()
-        decode_vc_kwargs = {
-            "use_ddim": use_ddim, "ddim_steps": ddim_steps, "ddim_eta": ddim_eta,
-            "unconditional_guidance_scale": unconditional_guidance_scale
-        }
-        log["reconstruction"] = self.decode_vc(vc, n_frames, context, uc_context, **decode_vc_kwargs)
-
-
-        log['full_frames'] = rearrange(batch[self.videocontent_key].to(self.device),
-                                       'b c t h w -> b c h (t w)')
-        # start sampling
-        if sample:
-            vc_sample, _ = self.sample_log(cond=new_cond, batch_size=N, ddim=use_ddim,
-                                           ddim_steps=ddim_steps, eta=ddim_eta, verbose=verbose)
-            samples = self.decode_vc(vc_sample, n_frames, context,
-                                     uc_context, **decode_vc_kwargs)
+        log["reconstruction"] = self.decode_vc(vc, **decode_vc_kwargs)
+        log['full_frames'] = batch[self.videocontent_key].to(self.device) # b, c, t, h, w
+        # full conditional sampling
+        new_cond = {"c_crossattn": [context]}
+        uc_cond = {"c_crossattn": [uc_context]}
+        if sample or unconditional_guidance_scale <= 0.0:
+            vc_sample, _ = self.sample_log(cond=new_cond, batch_size=N, x_T=x_T,
+                                           verbose=verbose, **ddim_kwargs)
+            samples = self.decode_vc(vc_sample, **decode_vc_kwargs)
             log["samples"] = samples
-
+        # sampling with unconditional guidance scale
         if unconditional_guidance_scale > 0.0:
-            uc_cond = {"c_crossattn": [uc_context]}
-            vc_sample, _ = self.sample_log(cond=new_cond, batch_size=N, ddim=use_ddim,
-                                           ddim_steps=ddim_steps, eta=ddim_eta, verbose=verbose,
+            vc_sample, _ = self.sample_log(cond=new_cond, batch_size=N, x_T=x_T,
                                            unconditional_conditioning=uc_cond,
-                                           unconditional_guidance_scale=unconditional_guidance_scale)
-            samples = self.decode_vc(vc_sample, n_frames, context,
-                                     uc_context, **decode_vc_kwargs)
+                                           unconditional_guidance_scale=unconditional_guidance_scale,
+                                           verbose=verbose, **ddim_kwargs)
+            samples = self.decode_vc(vc_sample, **decode_vc_kwargs)
             log[f"samples_ug_scale_{unconditional_guidance_scale:.2f}"] = samples
         return log
 
     @torch.no_grad()
-    def sample_log(self, cond, batch_size, ddim, ddim_steps, verbose=False, **kwargs):
+    def sample_log(self, cond, batch_size, use_ddim, ddim_steps, x_T, verbose=False, **kwargs):
         ddim_sampler = DDIMSampler(self)
-        shape = (self.vc_channels, self.vc_size, self.vc_size)
+        shape = (batch_size, self.vc_channels, self.vc_size, self.vc_size)
+        noise = torch.randn(shape, device=self.device)
+        x_T = noise if x_T is None else noise
         samples, intermediates = ddim_sampler.sample(ddim_steps, batch_size, shape,
-                                                     cond, verbose=verbose, **kwargs)
+                                                     cond, x_T=x_T, verbose=verbose, **kwargs)
         return samples, intermediates
 
     def configure_optimizers(self):

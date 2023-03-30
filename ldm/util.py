@@ -9,14 +9,12 @@ from inspect import isfunction
 from torchvision.utils import make_grid
 from PIL import Image, ImageDraw, ImageFont
 
-def tensor2img(x, n_row=4):
+def tensor2img(x):
     img = x.detach().cpu().float()
-    if len(img.shape) == 5: # b c t h w
+    assert len(img.shape) in [3, 5] # b c t h w
+    if len(img.shape) == 5:
         img = rearrange(img, "b c t h w -> c (b h) (t w)")
-    elif len(img.shape) == 4: # c t h w
-        img = rearrange(img, "c t h w -> c h (t w)")
     x_samples = torch.clamp((img + 1.0) / 2.0, min=0.0, max=1.0)
-    x_samples = make_grid(x_samples, nrow=n_row)
     x_samples = 255. * rearrange(x_samples.cpu().numpy(), 'c h w -> h w c')
     img = Image.fromarray(x_samples.astype(np.uint8))
     return img

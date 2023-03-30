@@ -12,6 +12,13 @@
           </advancedOptions>
         </fileTransfer>
       </webServer>
+      <webServer id="3d9edd54-cec1-42e3-88a8-a23cdba0bc59" name="71">
+        <fileTransfer rootFolder="/raid/mzsun/codes" accessType="SFTP" host="172.29.236.71" port="22" sshConfigId="fa234a62-d57d-4908-86ca-c41db27bd25d" sshConfig="manager@172.29.236.71:22 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
     </option>
     <groups>
       <group>
@@ -19,6 +26,7 @@
         <servers>
           <name value="xinxin.zhu@58.48.42.233:22" />
           <name value="72" />
+          <name value="71" />
         </servers>
       </group>
     </groups>
