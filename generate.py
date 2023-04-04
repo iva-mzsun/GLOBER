@@ -38,12 +38,12 @@ from main import get_parser, load_state_dict, nondefault_trainer_args
 
 def get_dataloader(data_cfg, batch_size):
     import torch.utils.data as Data
-    # data_cfg.params.shuffle = False
+    data_cfg.params.shuffle = False
     dataset = instantiate_from_config(data_cfg)
     dataloader = Data.DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
         pin_memory=False,
         drop_last=False
     )

@@ -20,7 +20,7 @@ model:
     validation_log_every_epochs: 20
 
     vc_size: 16 # according to vc shape
-    vc_channels: 16 # according to vc shape
+    vc_channels: 32 # according to vc shape
     latent_size: 16 # according to kl-vae
     latent_channels: 4 # according to kl-vae
 
@@ -30,7 +30,7 @@ model:
         use_fp16: True
         input_size: 16 # according to vc shape
         patch_size: 1
-        in_channels: 16 # according to vc shape
+        in_channels: 32 # according to vc shape
         hidden_size: 1152
         depth: 28
         num_heads: 16
@@ -84,7 +84,7 @@ model:
             dims: 3
             image_size: 16
             in_channels: 4
-            out_channels: 16 # vc shape: [ 16, 16, 16 ]
+            out_channels: 32 # vc shape: [ 16, 16, 32 ]
             model_channels: 320
             num_res_blocks: 8
             learnable_content: True
@@ -114,7 +114,7 @@ model:
           ddim_steps: 50
           ddim_eta: 0.0
           unconditional_guidance_scale: 3.0
-        ckpt_path: experiments/2023-03-29T03-06-08_ablate_expa2_ucf128x_ldmae/checkpoints/last.ckpt
+        ckpt_path: experiments/2023-03-29T03-06-11_ablate_expa3_ucf128x_ldmae/checkpoints/last.ckpt
 
 data:
   target: main.DataModuleFromConfig

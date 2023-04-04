@@ -11,8 +11,11 @@ from PIL import Image, ImageDraw, ImageFont
 
 def tensor2img(x):
     img = x.detach().cpu().float()
-    assert len(img.shape) in [3, 5] # b c t h w
-    if len(img.shape) == 5:
+    assert len(img.shape) in [3, 4, 5]
+    if len(img.shape) == 4: # b c h w
+        col = min(img.shape[0], 8)
+        img = rearrange(img, "(ro co) c h w -> c (ro h) (co w)", co=col)
+    if len(img.shape) == 5: # b c t h w
         img = rearrange(img, "b c t h w -> c (b h) (t w)")
     x_samples = torch.clamp((img + 1.0) / 2.0, min=0.0, max=1.0)
     x_samples = 255. * rearrange(x_samples.cpu().numpy(), 'c h w -> h w c')

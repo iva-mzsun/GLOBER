@@ -14,15 +14,15 @@ model:
     timesteps: 1000
     cond_stage_key: "txt"
     frame_index_key: "frame_index"
-    image_size: 16
+    image_size: 32
     channels: 4
     cond_stage_trainable: false
     conditioning_key: crossattn
-    monitor: val/loss_simple_ema
+    monitor: train/loss_simple_epoch
     scale_factor: 0.18215
     use_ema: False
     learn_logvar: False
-    validation_log_start_epoch: 500
+    validation_log_start_epoch: 0
     validation_log_every_epochs: 50
 
     scheduler_config: # 10000 warmup steps
@@ -44,7 +44,7 @@ model:
         target: ldm_autoencoder.ldm_autoencoder_v1.Discriminator
         params:
           dims: 3
-          image_size: 16
+          image_size: 32
           in_channels: 4
           model_channels: 256
           num_res_blocks: 1
@@ -60,9 +60,9 @@ model:
       target: ldm_autoencoder.ldm_autoencoder_v1.VideoContentEnc
       params:
         dims: 3
-        image_size: 16
+        image_size: 32
         in_channels: 4
-        out_channels: 16 # vc shape: [ 16, 16, 16 ]
+        out_channels: 16 # vc shape: [32, 32, 16]
         model_channels: 320
         num_res_blocks: 8
         learnable_content: True
@@ -75,7 +75,7 @@ model:
     unet_config:
       target: ldm_autoencoder.ldm_autoencoder_v1.AEUnetModel
       params:
-        image_size: 16 # unused
+        image_size: 32 # unused
         in_channels: 4
         out_channels: 4
         model_channels: 320
@@ -98,7 +98,7 @@ model:
         ddconfig:
           double_z: true
           z_channels: 4
-          resolution: 128
+          resolution: 256
           in_channels: 3
           out_ch: 3
           ch: 128
@@ -121,28 +121,32 @@ data:
   params:
     wrap: False
 #    batch_size: 2 # For debug
-    batch_size: 256
-    num_workers: 8
+    batch_size: 48
+    num_workers: 4
     train:
       target: data.custom.VideoFolderDataset_AEwT
       params:
-        size: 128
+        size: 256
         flip_p: 0.5
         num_frames: 2
         sort_index: True
+#        max_data_num: 48 # For debug
         content_frame_idx:
           - 0
           - 5
           - 10
           - 15
         full_video_length: 16
-        root: datasets/ucf101/trainval_32fps
+        fix_prompt: "time-lapse video of sky"
+        root: datasets/SkyTimelapse/sky_timelapse/reorganized_frames/trainval/FPS32
     validation:
       target: data.custom.VideoFolderDataset_AEwT
       params:
-        size: 128
+        size: 256
         num_frames: 2
         sort_index: True
+        max_data_num: 2048
+#        max_data_num: 48 # for debug
         allow_flip: False
         allow_point: False
         content_frame_idx:
@@ -151,7 +155,8 @@ data:
           - 10
           - 15
         full_video_length: 16
-        root: datasets/ucf101/ucf101_fps32_test2048_wclasses
+        fix_prompt: "time-lapse video of sky"
+        root: datasets/SkyTimelapse/sky_timelapse/reorganized_frames/trainval/FPS32
 
 lightning:
   trainer:
@@ -159,7 +164,7 @@ lightning:
     accelerator: 'gpu'
     devices: 8
     log_gpu_memory: all
-    max_epochs: 3000
+    max_epochs: 2000
     precision: 16
     auto_select_gpus: False
     strategy:

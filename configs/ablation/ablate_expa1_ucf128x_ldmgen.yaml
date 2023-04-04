@@ -120,7 +120,7 @@ data:
   target: main.DataModuleFromConfig
   params:
     wrap: False
-    batch_size: 96 # TODO
+    batch_size: 96
     num_workers: 8
     train:
       target: data.custom.VideoFolderDataset_AEwT
@@ -158,7 +158,7 @@ lightning:
     accelerator: 'gpu'
     devices: 2
     log_gpu_memory: all
-    max_epochs: 1000
+    max_epochs: 2000
     precision: 16
     auto_select_gpus: False
     strategy:

@@ -17,6 +17,8 @@ from ldm_autoencoder.diffusion.ddpm_v1 import LatentDiffusion
 from ldm_autoencoder.utils.blocks import ResBlockwoEmb, TemporalAttentionBlock, \
     SpatialAttentionBlock, SpatioTemporalAttentionBlock
 
+from ipdb import set_trace as st
+
 class Discriminator(nn.Module):
     def __init__(
         self,
@@ -631,11 +633,13 @@ class AutoEncLDM(LatentDiffusion):
         assert isinstance(cond, dict)
         diffusion_model = self.model.diffusion_model
         cond_txt = torch.cat(cond['c_crossattn'], 1) # b, l, c
-        cond_vc = torch.cat(cond['c_video'], 2) # b, c, t, h, w
-        cond_index = cond['c_index'][0] # b, t
         # cond_index = torch.cat(cond['c_index'], 1) # b, 1
-        vc_feats, kl_loss = self.videocontent_enc(x=cond_vc, index=cond_index,
-                                                  is_training=is_training)
+        vc_feats = cond.get('vc_feats', None)
+        if vc_feats is None:
+            cond_index = cond['c_index'][0]  # b, t
+            cond_vc = torch.cat(cond['c_video'], 2)  # b, c, t, h, w
+            vc_feats, kl_loss = self.videocontent_enc(x=cond_vc, index=cond_index,
+                                                      is_training=is_training)
         eps = diffusion_model(x=x_noisy, vc_feats=vc_feats, timesteps=t, context=cond_txt)
 
         if is_training:
@@ -693,8 +697,8 @@ class AutoEncLDM(LatentDiffusion):
         return log
 
     @torch.no_grad()
-    def log_videos(self, batch, N=2, n_frames=4, sample=True, ddim_steps=50, ddim_eta=0.0,
-                   verbose=False, unconditional_guidance_scale=9.0, **kwargs):
+    def log_videos(self, batch, N=8, n_frames=4, sample=True, ddim_steps=50, ddim_eta=0.0,
+                   verbose=False, unconditional_guidance_scale=3.0, **kwargs):
         B, T = batch[self.frame_index_key].shape
         N = min(B, N)
         # obtain inputs
@@ -709,9 +713,8 @@ class AutoEncLDM(LatentDiffusion):
         new_cond = {"c_video": [vc], "c_crossattn": [c]}
         # obtain logs
         log = dict()
-        log["reconstruction"] = self.decode_first_stage(z)
-        log['full_frames'] = rearrange(batch[self.videocontent_key].to(self.device),
-                                       'b c t h w -> b c h (t w)')
+        log["reconstruction"] = self.decode_first_stage(z)[:N, :]
+        log['full_frames'] = batch[self.videocontent_key][:N, :].to(self.device)
         # start sampling
         assert unconditional_guidance_scale >= 0.0
         if sample or unconditional_guidance_scale == 0.0:
@@ -745,6 +748,56 @@ class AutoEncLDM(LatentDiffusion):
             x_samples_ug = rearrange(x_samples_ug, 'b t c h w -> b c t h w')
             log[f"samples_ug_scale_{unconditional_guidance_scale:.2f}"] = x_samples_ug
         return log
+
+    @torch.no_grad()
+    def parallel_sample(self, batch, vidcontent, n_frames=4,
+                        ddim_steps=50, ddim_eta=0.0, unconditional_guidance_scale=3.0, verbose=False, **kwargs):
+        N = batch[self.frame_index_key].shape[0]
+        use_ddim = ddim_steps is not None
+        z, cond = self.get_input(batch, None, repeat_c_by_T=False)
+        # obtain textual and index conditions
+        c = cond["c_crossattn"][0] # b, 77, 1024
+        c = repeat(c, 'b c l -> b n c l', n=n_frames)
+        c = rearrange(c, 'b n c l -> (b n) c l')
+        index = []
+        for t in range(n_frames):
+            cind = torch.ones((N, 1)) * t / n_frames
+            index.append(cind.to(self.device))
+        index = torch.cat(index, dim=0) # (b n) 1
+        # obtain condition vc_feats
+        vidcontent = repeat(vidcontent, 'b c h w -> b n c h w', n=n_frames)
+        vidcontent = rearrange(vidcontent, 'b n c h w -> (b n) c h w')
+        vc_feats = self.videocontent_enc.decode(vidcontent, index)
+        new_cond = {"c_crossattn": [c], "vc_feats": vc_feats}
+        # obtain uncondition conditions
+        uc_cross = self.get_unconditional_conditioning(N*n_frames)
+        input_frame = torch.zeros_like(batch['full_frame'])
+        input_frame = rearrange(input_frame, 'b c t h w -> (b t) c h w')
+        latent_x = self.encode_first_stage(input_frame.cuda())
+        latent_x = self.get_first_stage_encoding(latent_x)
+        latent_x = rearrange(latent_x, '(b t) c h w -> b c t h w', b=N)
+        uc_vidcontent = self.videocontent_enc.encode(latent_x).mode()
+        uc_vidcontent = repeat(uc_vidcontent, 'b c h w -> b n c h w', n=n_frames)
+        uc_vidcontent = rearrange(uc_vidcontent, 'b n c h w -> (b n) c h w')
+        uc_feats = self.videocontent_enc.decode(uc_vidcontent, index)
+        uc_cond = {"c_crossattn": [uc_cross], "vc_feats": uc_feats}
+        # start sampling
+        assert unconditional_guidance_scale >= 0.0
+        if unconditional_guidance_scale == 0.0:
+            frames, _ = self.sample_log(cond=new_cond, batch_size=N*n_frames, ddim=use_ddim,
+                                         ddim_steps=ddim_steps, eta=ddim_eta, verbose=verbose)
+            x_samples = self.decode_first_stage(frames)
+            x_samples = rearrange(x_samples, '(b n) c h w -> b c n h w', n=n_frames)
+        else:
+            frames_ug, _ = self.sample_log(cond=new_cond, batch_size=N*n_frames, ddim=use_ddim,
+                                           ddim_steps=ddim_steps, eta=ddim_eta, verbose=verbose,
+                                           unconditional_conditioning=uc_cond,
+                                           unconditional_guidance_scale=unconditional_guidance_scale)
+            x_samples = self.decode_first_stage(frames_ug)
+            x_samples = rearrange(x_samples, '(b n) c h w -> b c n h w', n=n_frames)
+        return x_samples
+
+
 
     @torch.no_grad()
     def sample_log(self, cond, batch_size, ddim, ddim_steps, verbose=False, **kwargs):
@@ -818,7 +871,7 @@ class AutoEncLDM(LatentDiffusion):
             flag = flag or (n[:3] == "out" and not self.sd_lock_output)
             flag = flag or (n[:6] == "middle" and not self.sd_lock_middle)
             if flag:
-                print("Add optimize parameters: ", n)
+                # print("Add optimize parameters: ", n)
                 g_params.append(p)
 
         # == parameters of discriminator ==
