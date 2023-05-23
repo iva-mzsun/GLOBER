@@ -1,7 +1,8 @@
 model:
-  base_learning_rate: 5e-5
-  target: cldm.ldmae_v3.AutoEncLDM
+  base_learning_rate: 1e-5
+  target: ldm_autoencoder.ldm_autoencoder_v2.AutoEncLDM
   params:
+    kl_loss_weight: 0.000001
     sd_lock_input: False
     sd_lock_middle: False
     sd_lock_output: False
@@ -21,6 +22,8 @@ model:
     scale_factor: 0.18215
     use_ema: False
     learn_logvar: False
+    validation_log_start_epoch: 0
+    validation_log_every_epochs: 20
 
     scheduler_config: # 10000 warmup steps
       target: ldm.lr_scheduler.LambdaLinearScheduler
@@ -31,25 +34,47 @@ model:
         f_max: [ 1. ]
         f_min: [ 1. ]
 
+    allow_gan: True
+    gan_config:
+      generator_frequency: 1
+      discriminator_frequency: 2
+      adversarial_loss: hinge
+      generator_loss_weight: 0.1
+      discriminator:
+        target: ldm_autoencoder.ldm_autoencoder_v2.Discriminator
+        params:
+          dims: 3
+          image_size: 32
+          in_channels: 4
+          model_channels: 256
+          num_res_blocks: 1
+          attention_resolutions: [ 2, 4, 8, 16 ]
+          channel_mult: [ 1, 1, 2, 2, 2 ]
+          num_head_channels: 32
+          use_checkpoint: True
+          legacy: False
+          temporal_embeddings: True
+
     videocontent_key: "full_frame"
     videoenc_config:
-      target: cldm.ldmae_v3.VideoContentEnc
+      target: ldm_autoencoder.ldm_autoencoder_v2.VideoContentEnc
       params:
         dims: 3
         image_size: 32
         in_channels: 4
-        out_channels: 64
+        out_channels: 16
         model_channels: 320
-        num_res_blocks: 1
+        num_res_blocks: 2
         learnable_content: True
         attention_resolutions: [ 1, 2 ]
-        channel_mult: [ 1, 2, 4]
+        channel_mult: [ 1, 2]
         num_head_channels: 64
         use_checkpoint: True
         legacy: False
+        learnvar: True
 
     unet_config:
-      target: cldm.ldmae_v3.AEUnetModel
+      target: ldm_autoencoder.ldm_autoencoder_v2.AEUnetModel
       params:
         image_size: 32 # unused
         in_channels: 4
@@ -65,7 +90,7 @@ model:
         use_checkpoint: True
         legacy: False
 
-    first_stage_key: "tar_frame" # current video frame
+    first_stage_key: "tar_frames" # current video frame
     first_stage_config:
       target: ldm.models.autoencoder.AutoencoderKL
       params:
@@ -96,91 +121,72 @@ data:
   target: main.DataModuleFromConfig
   params:
     wrap: False
-#    batch_size: 2 # For debug
-    batch_size: 16
-    num_workers: 4
+    batch_size: 40
+    num_workers: 8
     train:
-      target: cldm.data.custom.VideoFolderDataset_AE
+      target: data.custom.VideoFolderDataset_AEwT
       params:
         size: 256
         flip_p: 0.5
-        start_zero_p: 0.1
-#        max_data_num: 96 # For debug
+        num_frames: 2
+        sort_index: True
         content_frame_idx:
           - 0
           - 5
           - 10
           - 15
         full_video_length: 16
-        root: /home/zhongguokexueyuanzidonghuayanjiusuo/datasets/UCF-101/frames_fps20
+        fix_prompt: "A video of a person"
+        root: datasets/ucf101/trainval_32fps
     validation:
-      target: cldm.data.custom.VideoFolderDataset_AE
+      target: data.custom.VideoFolderDataset_AEwT
       params:
         size: 256
-        flip_p: 0.5
-        start_zero_p: 0.1
-        max_data_num: 2048
-#        max_data_num: 96 # for debug
+        num_frames: 2
+        sort_index: True
+        allow_flip: False
+        allow_point: False
         content_frame_idx:
           - 0
           - 5
           - 10
           - 15
         full_video_length: 16
-        root: /home/zhongguokexueyuanzidonghuayanjiusuo/datasets/UCF-101/frames_fps20
+        fix_prompt: "A video of a person"
+        root: datasets/ucf101/ucf101_fps32_test2048_wclasses
 
 lightning:
   trainer:
     ckpt_load_strict: False
+    ignore_keys:
+      - spatial_discriminator
+      - temporal_discriminator
     accelerator: 'gpu'
     devices: 8
     log_gpu_memory: all
-    max_epochs: 500
+    max_epochs: 3000
     precision: 16
     auto_select_gpus: False
     strategy:
       target: strategies.DDPStrategy
       params:
         find_unused_parameters: True
-#    strategy:
-#      target: strategies.ColossalAIStrategy
-#      params:
-#        use_chunk: True
-#        enable_distributed_storage: True
-#        placement_policy: cuda
-#        force_outputs_fp32: true
-#        min_chunk_size: 64
-
     log_every_n_steps: 2
     logger: True
     default_root_dir: "experiments/"
-
-#  callbacks:
-#    image_logger:
-#      target: main.ImageLogger
-#      params:
-#        batch_frequency: 200
-#        max_images: 4
-#        increase_log_steps: False
-#        log_first_step: True
-#        log_all_val: True
-#        log_images_kwargs:
-#          ddim_steps: 200
-#          use_ema_scope: True
-#          inpaint: False
-#          plot_progressive_rows: False
-#          plot_diffusion_rows: False
-#          N: 4
-#          unconditional_guidance_scale: 3.0
-#          unconditional_guidance_label: [ "" ]
-
+  callbacks:
+    image_logger:
+      target: main.ImageLogger
+      params:
+        log_imgs: True
+  modelcheckpoint:
+    target: lightning.pytorch.callbacks.ModelCheckpoint
+    params:
+      every_n_epochs: 250
+      save_top_k: 10
   logger:
     wandb:
       target: lightning.pytorch.loggers.WandbLogger
       params:
           project: control
           group: ucf101
-          name: nowname
-          save_dir: "experiments/"
-          offline: opt.debug
-          id: nowname

@@ -7,7 +7,7 @@ model:
     num_timesteps_cond: 1
     log_every_t: 200
     timesteps: 1000
-    image_size: 8
+    image_size: 16
     channels: 4
     cond_stage_trainable: false
     conditioning_key: crossattn
@@ -16,29 +16,26 @@ model:
     use_ema: False
     learn_logvar: False
     videocontent_key: "full_frame"
+    validation_log_start_epoch: 0
+    validation_log_every_epochs: 1
 
-    vc_size: 8
-    vc_channels: 64
+    vc_size: 16
+    vc_channels: 16
     latent_size: 32
     latent_channels: 4
 
     diffusion_config:
-      target: ldm.modules.diffusionmodules.openaimodel.UNetModel
+      target: ldm_generator.diffusion.dit_model.DiT_crossattn
       params:
         use_fp16: True
-        image_size: 8 # unused
-        in_channels: 64
-        out_channels: 64
-        model_channels: 320 #768
-        attention_resolutions: [ 4, 2, 1 ]
-        num_res_blocks: 2
-        channel_mult: [ 1, 2, 4 ]
-        num_heads: 8
-        use_spatial_transformer: True
-        transformer_depth: 1
-        context_dim: 768
-        use_checkpoint: True
-        legacy: False
+        input_size: 16
+        patch_size: 1
+        in_channels: 16
+        hidden_size: 1152
+        depth: 28
+        num_heads: 16
+        mlp_ratio: 4
+        learn_sigma: False
 
     first_stage_key: "tar_frames" # current video frames
     first_stage_config:
@@ -79,26 +76,27 @@ model:
         image_size: 32
         channels: 4
         conditioning_key: crossattn
-        monitor: val/loss_simple_ema
         use_ema: False
         learn_logvar: False
         enc_cfg:
-          target: cldm.ldmae_v5.VideoContentEnc
+          target: ldm_autoencoder.ldm_autoencoder_v2.VideoContentEnc
           params:
             dims: 3
             image_size: 32
             in_channels: 4
-            out_channels: 64
+            out_channels: 16
             model_channels: 320
-            num_res_blocks: 1
+            num_res_blocks: 2
             learnable_content: True
             attention_resolutions: [ 1, 2 ]
-            channel_mult: [ 1, 2, 4 ]
+            channel_mult: [ 1, 2 ]
             num_head_channels: 64
             use_checkpoint: True
             legacy: False
+            learnvar: True
+
         diffusion_config:
-          target: cldm.ldmae_v5.AEUnetModel
+          target: ldm_autoencoder.ldm_autoencoder_v2.AEUnetModel
           params:
             image_size: 32 # unused
             in_channels: 4
@@ -113,36 +111,40 @@ model:
             context_dim: 768
             use_checkpoint: True
             legacy: False
-        ckpt_path: experiments/2023-03-07T20-56-08_ldm_ae_v5-2/checkpoints/epoch=0120-step=028798.ckpt
+        decode_sample_cfg:
+          use_ddim: True
+          ddim_steps: 50
+          ddim_eta: 0.0
+          unconditional_guidance_scale: 3.0
+        ckpt_path: experiments/2023-05-06T06-38-20_ldmae_ucf256x_uc_v1/checkpoints/epoch=0999-step=042000.ckpt
 
 data:
   target: main.DataModuleFromConfig
   params:
     wrap: False
-#    batch_size: 2 # For debug
-    batch_size: 32
-    num_workers: 4
+    batch_size: 40
+    num_workers: 8
     train:
-      target: cldm.data.custom.VideoFolderDataset_AEwT
+      target: data.custom.VideoFolderDataset_AEwT
       params:
         size: 256
         flip_p: 0.5
-        num_frames: 1
-        allow_point: False # TODO
-#        max_data_num: 96 # For debug
+        num_frames: 2
+        sort_index: True
         content_frame_idx:
           - 0
           - 5
           - 10
           - 15
         full_video_length: 16
-        root: datasets/UCF-101/frames_fps20
+        fix_prompt: "A video of a person"
+        root: datasets/ucf101/trainval_32fps
     validation:
-      target: cldm.data.custom.VideoFolderDataset_AEwT
+      target: data.custom.VideoFolderDataset_AEwT
       params:
         size: 256
-        num_frames: 1
-#        max_data_num: 96 # for debug
+        num_frames: 2
+        sort_index: True
         allow_flip: False
         allow_point: False
         content_frame_idx:
@@ -151,39 +153,39 @@ data:
           - 10
           - 15
         full_video_length: 16
-        root: datasets/UCF-101/preprocessed/ucf101_test2048_wclasses
+        fix_prompt: "A video of a person"
+        root: datasets/ucf101/ucf101_fps32_test2048_wclasses
 
 lightning:
   trainer:
+    check_val_every_n_epoch: 20
     ckpt_load_strict: False
     accelerator: 'gpu'
-    devices: 4
+    devices: 8
     log_gpu_memory: all
-    max_epochs: 500
+    max_epochs: 2000
     precision: 16
     auto_select_gpus: False
     strategy:
       target: strategies.DDPStrategy
       params:
         find_unused_parameters: True
-
     log_every_n_steps: 2
     logger: True
     default_root_dir: "experiments/"
-
   callbacks:
     image_logger:
       target: main.ImageLogger
       params:
         log_imgs: True
-
+  modelcheckpoint:
+    target: lightning.pytorch.callbacks.ModelCheckpoint
+    params:
+      every_n_epochs: 250
+      save_top_k: 10
   logger:
     wandb:
       target: lightning.pytorch.loggers.WandbLogger
       params:
           project: control
           group: ucf101
-          name: nowname
-          save_dir: "experiments/"
-          offline: opt.debug
-          id: nowname
