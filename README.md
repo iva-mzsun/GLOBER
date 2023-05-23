@@ -1,7 +1,11 @@
 # BLOBER
 
-The official code for the paper: GLOBER: Coherent Non-autoregressive Video Generation via Global Guided Video Decoder
+The official code for the paper: 
 
+GLOBER: Coherent Non-autoregressive Video Generation via Global Guided Video Decoder
+
+## More visualized samples
+More visualized samples are presented in: 
 
 ## Test generation speed of prior methods
 
