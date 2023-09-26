@@ -4,7 +4,9 @@ The official code for the paper:
 
 GLOBER: Coherent Non-autoregressive Video Generation via Global Guided Video Decoder
 
-[ARXIV](Coming Soon) [DEMO](https://iva-mzsun.github.io/GLOBER)
+[ARXIV](https://arxiv.org/abs/2309.13274) [DEMO](https://iva-mzsun.github.io/GLOBER)
+
+
 
 ## Conda Environment
 
