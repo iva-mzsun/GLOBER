@@ -20,19 +20,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="c428820c-cbb5-4137-a561-0a12a60844ed" name="Default Changelist" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/GLOBER.iml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/.gitignore" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/StableVideoAE.iml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/deployment.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/deployment.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/inspectionProfiles/Project_Default.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/Project_Default.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/modules.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/webServers.xml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/script_for_fvd.sh" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/script_for_fvd.sh" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/script_for_fvd_3c.sh" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/script_for_fvd_3c.sh" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/script_for_sample.sh" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/script_for_sample.sh" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/script_for_sample_3c.sh" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/script_for_sample_3c.sh" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/cmd.sh" beforeDir="false" afterPath="$PROJECT_DIR$/cmd.sh" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/configs/SkyTimelapse/sky_ldmae_16f_wgan.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/configs/SkyTimelapse/sky_ldmae_16f_wgan.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/configs/SkyTimelapse/sky_ldmae_16f_wogan.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/configs/SkyTimelapse/sky_ldmae_16f_wogan.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -52,6 +43,8 @@
     <property name="RunOnceActivity.OpenProjectViewOnStart" value="true" />
     <property name="SHARE_PROJECT_CONFIGURATION_FILES" value="true" />
     <property name="WebServerToolWindowFactoryState" value="true" />
+    <property name="last_opened_file_path" value="$PROJECT_DIR$/configs/SkyTimelapse/sky_ldmae_16f_wogan.yaml" />
+    <property name="two.files.diff.last.used.file" value="$PROJECT_DIR$/configs/SkyTimelapse/sky_ldmae_16f_wogan.yaml" />
   </component>
   <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
   <component name="TaskManager">
@@ -61,7 +54,8 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1704951175030</updated>
-      <workItem from="1704951177158" duration="1055000" />
+      <workItem from="1704951177158" duration="1662000" />
+      <workItem from="1704961716534" duration="1222000" />
     </task>
     <servers />
   </component>
@@ -78,5 +72,24 @@
         </entry>
       </map>
     </option>
+    <option name="oldMeFiltersMigrated" value="true" />
+  </component>
+  <component name="WindowStateProjectService">
+    <state x="-1468" y="96" key="#Deployment" timestamp="1704962690685">
+      <screen x="-1920" y="0" width="1920" height="1040" />
+    </state>
+    <state x="-1468" y="96" key="#Deployment/-1920.0.1920.1040/0.0.1920.1040@-1920.0.1920.1040" timestamp="1704962690685" />
+    <state x="-1488" y="79" key="#SSH_Configurations" timestamp="1704962678118">
+      <screen x="-1920" y="0" width="1920" height="1040" />
+    </state>
+    <state x="-1488" y="79" key="#SSH_Configurations/-1920.0.1920.1040/0.0.1920.1040@-1920.0.1920.1040" timestamp="1704962678118" />
+    <state x="-1828" y="92" width="1736" height="856" key="DiffContextDialog" timestamp="1704962511141">
+      <screen x="-1920" y="0" width="1920" height="1040" />
+    </state>
+    <state x="-1828" y="92" width="1736" height="856" key="DiffContextDialog/-1920.0.1920.1040/0.0.1920.1040@-1920.0.1920.1040" timestamp="1704962511141" />
+    <state x="-1242" y="217" key="FileChooserDialogImpl" timestamp="1704962493772">
+      <screen x="-1920" y="0" width="1920" height="1040" />
+    </state>
+    <state x="-1242" y="217" key="FileChooserDialogImpl/-1920.0.1920.1040/0.0.1920.1040@-1920.0.1920.1040" timestamp="1704962493772" />
   </component>
 </project>

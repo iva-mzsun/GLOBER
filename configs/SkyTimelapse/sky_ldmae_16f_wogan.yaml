@@ -1,8 +1,8 @@
 model:
   base_learning_rate: 1e-4
-  target: ldm_autoencoder.ldm_ae_base_v3.AutoEncLDM
+  target: ldm_autoencoder.ldm_ae.AutoEncLDM
   params:
-    kl_loss_weight: ~
+    kl_loss_weight: 1e-7
     optimize_params_key: ~
     linear_start: 0.00085
     linear_end: 0.0120
@@ -105,7 +105,7 @@ data:
         full_video_length: 16
         fix_prompt: "placeholder"
         content_frame_idx: [0, 2, 4, 6, 8, 10, 12, 14]
-        root: datasets/SkyTimelapse/sky_timelapse/reorganized_frames/trainval2/FPS32
+        root: path/to/sky_timelapse
     validation:
       target: data.VideoFolderDataset.VideoFolderDataset
 #      target: data.VideoItemDataset.VideoItemDataset
@@ -118,7 +118,7 @@ data:
         full_video_length: 16
         fix_prompt: "placeholder"
         content_frame_idx: [0, 2, 4, 6, 8, 10, 12, 14]
-        root: datasets/SkyTimelapse/sky_timelapse/reorganized_frames/trainval2/FPS32
+        root: path/to/sky_timelapse
 
 lightning:
   trainer:
