@@ -34,8 +34,38 @@ except:
 
 from ipdb import set_trace as st
 
-from ldm.util import instantiate_from_config, tensor2img, load_state_dict
-# from ldm.modules.attention import enable_flash_attentions
+from utils.util import instantiate_from_config, tensor2img, load_state_dict
+# from utils.modules.attention import enable_flash_attentions
+
+
+def initialize_os_environ():
+    import subprocess
+    """
+    这一部分是使用slurm运行的时候，自动添加的系统环境变量
+    """
+    proc_id = int(os.environ['SLURM_PROCID'])
+    ntasks = int(os.environ['SLURM_NTASKS'])
+    node_list = os.environ['SLURM_NODELIST']
+    print(f"proc_id: {proc_id}", flush=True)
+    print(f"ntasks: {ntasks}", flush=True)
+    print(f"node_list: {node_list}", flush=True)
+    print(f"torch.cuda.device_count: {torch.cuda.device_count()}", flush=True)
+
+    num_gpus = torch.cuda.device_count()
+    addr = subprocess.getoutput(f'scontrol show hostname {node_list} | head -n1')
+    """
+    获取到slurm的环境变量之后，我们要手动设置一下用于PyTorch分布式运行的环境变量
+    """
+    if 'MASTER_PORT' not in os.environ:
+        os.environ['MASTER_PORT'] = '29500'
+    if 'MASTER_ADDR' not in os.environ:
+        os.environ['MASTER_ADDR'] = addr
+    os.environ['WORLD_SIZE'] = str(ntasks)
+    os.environ['RANK'] = str(proc_id)
+    os.environ['LOCAL_RANK'] = str(proc_id % num_gpus)
+
+os.environ["WANDB__SERVICE_WAIT"] = "300"
+# initialize_os_environ()
 
 class DataLoaderX(DataLoader):
 
@@ -96,11 +126,25 @@ def get_parser(**parser_kwargs):
     parser.add_argument("--only_mid_control", type=bool, default=False)
 
     # ===== for generation =====
+    # dataset
+    parser.add_argument("--caps_path", type=str, default=None)
+    parser.add_argument("--num_replication", type=int, default=1)
     # hyper parameters
+    parser.add_argument("--use_ddim", type=bool, default=True)
     parser.add_argument("--ddim_step", type=int, default=50)
+    parser.add_argument("--ddim_sampler", type=str, default=None)
     parser.add_argument("--video_length", type=int, default=16)
     parser.add_argument("--unconditional_guidance_scale", type=float, default=9.0)
+    # hyper parameters for new ucgs
+    parser.add_argument("--new_unconditional_guidance", type=bool, default=False)
+    parser.add_argument("--unconditional_guidance_scale_img", type=float, default=3.0)
+    parser.add_argument("--unconditional_guidance_scale_vid", type=float, default=3.0)
+    parser.add_argument("--ucgs_frame", type=float, default=3.0)
+    parser.add_argument("--ucgs_video", type=float, default=3.0)
+    parser.add_argument("--ucgs_domain", type=float, default=3.0)
     # sample settings
+    parser.add_argument("--shuffle", type=bool, default=False)
+    # parser.add_argument("--parallel", type=bool, default=True) # can be removed
     parser.add_argument("--suffix", type=str, default="")
     parser.add_argument("--cur_part", type=int, default=1)
     parser.add_argument("--total_part", type=int, default=1)
@@ -108,9 +152,6 @@ def get_parser(**parser_kwargs):
     parser.add_argument("--test_verbose", type=bool, default=False)
     parser.add_argument("--total_sample_number", type=int, default=16)
     parser.add_argument("--save_mode", type=str, default="byvideo") # bybatch, byvideo, byframe
-    parser.add_argument("--use_gauss_shift", type=bool, default=False)
-    parser.add_argument("--gauss_shift_std", type=str, default=None)
-    parser.add_argument("--gauss_shift_mean", type=str, default=None)
     return parser
 
 def nondefault_trainer_args(opt):
@@ -188,6 +229,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
                            batch_size=self.batch_size,
                            num_workers=self.num_workers,
                            shuffle=True,
+                           # persistent_workers=True,
                            worker_init_fn=init_fn)
 
     def _val_dataloader(self, shuffle=False):
@@ -198,6 +240,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
         return DataLoaderX(self.datasets["validation"],
                            batch_size=self.batch_size,
                            num_workers=self.num_workers,
+                           # persistent_workers=True,
                            worker_init_fn=init_fn,
                            shuffle=shuffle)
 
@@ -211,6 +254,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
         return DataLoaderX(self.datasets["test"],
                            batch_size=self.batch_size,
                            num_workers=self.num_workers,
+                           # persistent_workers=True,
                            worker_init_fn=init_fn,
                            shuffle=shuffle)
 
@@ -222,15 +266,17 @@ class DataModuleFromConfig(pl.LightningDataModule):
         return DataLoaderX(self.datasets["predict"],
                            batch_size=self.batch_size,
                            num_workers=self.num_workers,
+                           # persistent_workers=True,
                            worker_init_fn=init_fn)
 
 class SetupCallback(Callback):
 
-    def __init__(self, resume, now, logdir, ckptdir, cfgdir, config, lightning_config):
+    def __init__(self, resume, now, imgdir, logdir, ckptdir, cfgdir, config, lightning_config):
         super().__init__()
         self.resume = resume
         self.now = now
         self.logdir = logdir
+        self.imgdir = imgdir
         self.ckptdir = ckptdir
         self.cfgdir = cfgdir
         self.config = config
@@ -245,8 +291,10 @@ class SetupCallback(Callback):
     # def on_pretrain_routine_start(self, trainer, pl_module):
     def on_fit_start(self, trainer, pl_module):
         if trainer.global_rank == 0:
+            torch.distributed.barrier()
             # Create logdirs and save configs
             os.makedirs(self.logdir, exist_ok=True)
+            os.makedirs(self.imgdir, exist_ok=True)
             os.makedirs(self.ckptdir, exist_ok=True)
             os.makedirs(self.cfgdir, exist_ok=True)
 
@@ -263,7 +311,6 @@ class SetupCallback(Callback):
             print(OmegaConf.to_yaml(self.lightning_config))
             OmegaConf.save(OmegaConf.create({"lightning": self.lightning_config}),
                            os.path.join(self.cfgdir, "{}-lightning.yaml".format(self.now)))
-
         else:
             # ModelCheckpoint callback created log directory --- remove it
             if not self.resume and os.path.exists(self.logdir):
@@ -272,8 +319,10 @@ class SetupCallback(Callback):
                 os.makedirs(os.path.split(dst)[0], exist_ok=True)
                 try:
                     os.rename(self.logdir, dst)
-                except FileNotFoundError:
+                # except FileNotFoundError or FileExistsError:
+                except:
                     pass
+            torch.distributed.barrier()
 
     # def on_fit_end(self, trainer, pl_module):
     #     if trainer.global_rank == 0:
@@ -295,8 +344,8 @@ class ImageLogger(Callback): # Report ERRORS under ColossalAI strategy.
         self.disabled = disabled
         self.log_imgs = log_imgs
         self.local_dir = local_dir
-        if self.local_dir:
-            os.makedirs(local_dir, exist_ok=True)
+        # if self.local_dir and trainer.global_rank == 0:
+        #     os.makedirs(local_dir, exist_ok=True)
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx: int):
         if not self.disabled and pl_module.global_step > 0 and batch_idx == 0:
@@ -344,7 +393,7 @@ class CUDACallback(Callback):
         except AttributeError:
             pass
 
-def obtain_trainer_kwargs(trainer_config, opt):
+def obtain_trainer_kwargs(trainer_config, lightning_config, opt):
     # trainer and callbacks
     trainer_kwargs = dict()
 
@@ -359,17 +408,15 @@ def obtain_trainer_kwargs(trainer_config, opt):
                 "offline": opt.debug,
                 "id": nowname,
             }
-        },
-        "tensorboard": {
-            "target": LIGHTNING_PACK_NAME + "loggers.TensorBoardLogger",
-            "params": {
-                "save_dir": logdir,
-                "name": "diff_tb",
-                "log_graph": True
-            }
         }
     }
-    logger_cfg = default_logger_cfgs["wandb"]
+    if "logger" in lightning_config:
+        logger_cfg = lightning_config.logger.wandb
+    else:
+        logger_cfg = OmegaConf.create()
+    default_logger_cfg = default_logger_cfgs["wandb"]
+    # default_logger_cfg = default_logger_cfgs["tensorboard"]
+    logger_cfg = OmegaConf.merge(default_logger_cfg, logger_cfg)
     trainer_kwargs["logger"] = instantiate_from_config(logger_cfg)
 
     # config the strategy, defualt is ddp
@@ -392,6 +439,7 @@ def obtain_trainer_kwargs(trainer_config, opt):
             "params": {
                 "resume": opt.resume,
                 "now": now,
+                "imgdir": imgdir,
                 "logdir": logdir,
                 "ckptdir": ckptdir,
                 "cfgdir": cfgdir,
@@ -432,21 +480,20 @@ def obtain_trainer_kwargs(trainer_config, opt):
             "dirpath": ckptdir,
             "filename": "{epoch:04}-{step:06}",
             "verbose": True,
-            # "save_last": True,
-            "every_n_epochs": 1,
+            "save_top_k": 1,
+            "save_last": False,
+            # "every_n_epochs": 1,
             "save_on_train_epoch_end": True,
         }
     }
     if hasattr(model, "monitor"):
         default_modelckpt_cfg["params"]["monitor"] = model.monitor
-        default_modelckpt_cfg["params"]["save_top_k"] = 1
     if "modelcheckpoint" in lightning_config:
         modelckpt_cfg = lightning_config.modelcheckpoint
     else:
         modelckpt_cfg = OmegaConf.create()
     modelckpt_cfg = OmegaConf.merge(default_modelckpt_cfg, modelckpt_cfg)
     callbacks_cfg['model_ckpt'] = modelckpt_cfg
-
     trainer_kwargs["callbacks"] = [instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg]
     return trainer_kwargs
 
@@ -567,18 +614,26 @@ if __name__ == "__main__":
         config.model["params"].update({"use_fp16": False})
     model = instantiate_from_config(config.model).cpu()
     if ckpt is not None:
+        reschedule_after_ckpt = trainer_config.get('reschedule_after_ckpt', False)
         load_strict = trainer_config.get('ckpt_load_strict', True)
         ignore_keys = trainer_config.get('ignore_keys', [])
         state = load_state_dict(ckpt.strip(), ignore_keys=ignore_keys)
         model.load_state_dict(state, strict=load_strict)
+        if reschedule_after_ckpt:
+            model.register_schedule()
+        state = None
+        del state
         print(f"Load ckpt from {ckpt} with strict {load_strict}")
     else:
         print(f"WARNING!! No pretrained LDM!!!")
 
     # create trainer
-    trainer_kwargs = obtain_trainer_kwargs(trainer_config, opt)
+    trainer_kwargs = obtain_trainer_kwargs(trainer_config, lightning_config, opt)
     trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs)
     trainer.logdir = logdir
+
+    # required by 75
+    torch.set_float32_matmul_precision('high') # 'medium'
 
     # data
     print(f"- Loading data...")

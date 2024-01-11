@@ -66,41 +66,35 @@ if __name__ == "__main__":
         rank_zero_info("Resuming from {}".format(opt.resume))
         if not os.path.exists(opt.resume):
             raise ValueError("Cannot find {}".format(opt.resume))
-        if os.path.isfile(opt.resume):
-            paths = opt.resume.split("/")
-            logdir = "/".join(paths[:-2])
-            rank_zero_info("logdir: {}".format(logdir))
-            ckpt = opt.resume
-        else:
-            assert os.path.isdir(opt.resume), opt.resume
-            logdir = opt.resume.rstrip("/")
-            ckpt = os.path.join(logdir, "checkpoints", "last.ckpt")
+        paths = opt.resume.split("/")
+        logdir = "/".join(paths[:-2])
+        rank_zero_info("logdir: {}".format(logdir))
+        ckpt = opt.resume
 
-        base_configs = sorted(glob.glob(os.path.join(logdir, "configs/*.yaml")))
-        opt.base = base_configs + opt.base
+        # base_configs = sorted(glob.glob(os.path.join(logdir, "configs/*.yaml")))
+        # opt.base = base_configs + opt.base
         _tmp = logdir.split("/")
         nowname = _tmp[-1]
     else:
         logdir = opt.logdir
         ckpt = "nan"
-    if opt.caps_path is not None:
-        sampledir = os.path.join(logdir, f"samples_given_{os.path.basename(opt.caps_path).split('.')[0]}")
-    elif opt.new_unconditional_guidance is False:
-        sampledir = os.path.join(logdir, f'samples-{opt.save_mode}-ucgs{opt.unconditional_guidance_scale}-'
-                                           f'{os.path.basename(ckpt).split(".")[0]}-ddim{opt.ddim_step}')
-    else:
-        sampledir = os.path.join(logdir, f'samples-{opt.save_mode}-ucgsimg{opt.unconditional_guidance_scale_img}'
-                                         f'-ucgsvid{opt.unconditional_guidance_scale_vid}-'
-                                         f'{os.path.basename(ckpt).split(".")[0]}')
-    sampledir = sampledir + opt.suffix
-    os.makedirs(sampledir, exist_ok=True)
-    seed_everything(opt.seed)
 
     # init and save configs
     configs = [OmegaConf.load(cfg.strip()) for cfg in opt.base]
     cli = OmegaConf.from_dotlist(unknown)
     config = OmegaConf.merge(*configs, cli)
     lightning_config = config.pop("lightning", OmegaConf.create())
+
+    ddim_sampler = opt.ddim_sampler or config.model["params"]["ddim_sampler"]
+    config.model["params"]["ddim_sampler"] = ddim_sampler
+    sampledir = os.path.join(logdir, f'samples-{opt.save_mode}-{opt.ddim_sampler}-'
+                                     f'f{opt.ucgs_frame}-v{opt.ucgs_video}-d{opt.ucgs_domain}-'
+                                     f'{os.path.basename(ckpt).split(".")[0]}')
+    if opt.suffix != "":
+        sampledir = sampledir + '-' + opt.suffix
+    os.makedirs(sampledir, exist_ok=True)
+    seed_everything(opt.seed)
+
     # merge trainer cli with config
     trainer_config = lightning_config.get("trainer", OmegaConf.create())
     trainer_config["devices"] = opt.ngpu or trainer_config["devices"]
@@ -152,42 +146,17 @@ if __name__ == "__main__":
                 final_number = max(len(os.listdir(sampledir)), bs * (batch_idx + 1))
                 print(f"Having generated {final_number} video samples in {sampledir}!")
                 exit()
-            if vc is None:
-                vc, _ = model.get_input(batch, None)
-            x_T = torch.randn_like(vc)
+
             start_t = time.time()
-            if opt.new_unconditional_guidance is False:
-                unconditional_guidance_scale = opt.unconditional_guidance_scale
-                try:
-                    sample_log = model.log_videos_parallel(batch, N=bs, n_frames=video_length, x_T=x_T, verbose=verbose,
-                                                           sample=False, use_ddim=use_ddim, ddim_steps=ddim_step,
-                                                           unconditional_guidance_scale=unconditional_guidance_scale)
-                except:
-                    sample_log = model.log_videos(batch, N=bs, n_frames=video_length, x_T=x_T, verbose=verbose,
-                                                  sample=False, use_ddim=use_ddim, ddim_steps=ddim_step,
-                                                  unconditional_guidance_scale=unconditional_guidance_scale)
-            else:
-                ucgs_img = opt.unconditional_guidance_scale_img
-                ucgs_vid = opt.unconditional_guidance_scale_vid
-                try:
-                    sample_log = model.log_videos_parallel(batch, N=bs, n_frames=video_length, x_T=x_T, verbose=verbose,
-                                                           sample=False, use_ddim=use_ddim, ddim_steps=ddim_step,
-                                                           ucgs_image=ucgs_img, ucgs_video=ucgs_vid)
-                except:
-                    sample_log = model.log_videos(batch, N=bs, n_frames=video_length, x_T=x_T, verbose=verbose,
-                                                  sample=False, use_ddim=use_ddim, ddim_steps=ddim_step,
-                                                  ucgs_image=ucgs_img, ucgs_video=ucgs_vid)
+            ucgs_frame = opt.ucgs_frame
+            ucgs_video = opt.ucgs_video
+            ucgs_domain = opt.ucgs_domain
+            sample_log = model.log_videos_parallel(batch, N=bs, n_frames=video_length, verbose=verbose,
+                                                   sample=False, use_ddim=use_ddim, ddim_steps=ddim_step,
+                                                   ucgs_frame=ucgs_frame, ucgs_video=ucgs_video, ucgs_domain=ucgs_domain)
             end_t = time.time()
             # print(f"Generation time: {end_t - start_t}s")
-            # print(sample_log.keys())
-            if use_ddim is False:
-                cur_video = sample_log["samples_ddpm"]
-            elif opt.new_unconditional_guidance is False:
-                cur_video = sample_log[f"samples_ug_scale_{unconditional_guidance_scale:.2f}"]
-            else:
-                cur_video = sample_log[f"samples_ug_scale_i{ucgs_img:.2f}v{ucgs_vid:.2f}"]
-
-            cur_video = cur_video.detach().cpu() # b c t h w
+            cur_video = sample_log[f"samples_ug_scale"].detach().cpu() # b c t h w
             if save_mode == "bybatch":
                 save = tensor2img(cur_video)
                 save.save(os.path.join(sampledir, f"{batch_idx:04d}.jpg"))

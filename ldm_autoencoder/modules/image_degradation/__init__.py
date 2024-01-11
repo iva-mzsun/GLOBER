@@ -1,0 +1,1 @@
+from ldm_autoencoder.modules.image_degradation.bsrgan import degradation_bsrgan_variant as degradation_fn_bsr
