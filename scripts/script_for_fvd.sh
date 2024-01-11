@@ -1,5 +1,5 @@
 # Usage:
-# bash script_for_fvd.sh EXP UC PTH CUDA
+# bash scripts/script_for_fvd.sh $EXP $UC $PTH $CUDA
 
 EXP=$1
 UC=$2
@@ -28,11 +28,7 @@ unset __conda_setup
 # <<< conda initialize <<<
 RESOLUTION=256
 FAKE_PATH=experiments/$EXP/samples-byframe-ucgs$UC-$PTH-ddim50
-#REAL_PATH=datasets/webvid/frames_1s/frames_16fps
-#REAL_PATH=datasets/webvid/frames_1s_for_test/frames_16fps_2_cur0_total2
-#REAL_PATH=datasets/SkyTimelapse/sky_timelapse/reorganized_frames/trainval/FPS32
-REAL_PATH=datasets/ucf101/ucf101_fps32_test2048_wclasses
-#REAL_PATH=datasets/ucf101/clips2048_union_256x
+REAL_PATH=datasets/SkyTimelapse/sky_timelapse/reorganized_frames/trainval/FPS32
 
 ROOT=/raid/mzsun/codes/StableBased/GLOBER_PLUS/
 conda activate ldm

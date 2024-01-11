@@ -1,5 +1,5 @@
 # Usage:
-# bash script_for_fvd.sh EXP UCFRAME UCVID UCDOMAIN PTH CUDA
+# bash scripts/script_for_fvd_3c.sh $EXP $UCFRAME $UCVID $UCDOMAIN $PTH $CUDA
 
 EXP=$1
 UCIMG=$2

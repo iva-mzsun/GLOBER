@@ -1,5 +1,5 @@
 # Usage:
-# bash script_for_sample_3c.sh CUR CUDA TOTAL CFG EXP PTH UC_FRAME UC_VIDEO UC_DOMAIN
+# bash scripts/script_for_sample_3c.sh $CUR $CUDA $TOTAL $CFG $EXP $PTH $UC_FRAME $UC_VIDEO $UC_DOMAIN
 
 CUR=$1
 CUDA=$2

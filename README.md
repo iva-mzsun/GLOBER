@@ -17,27 +17,24 @@ pip install -r requirements.txt
 
 ## Train Script
 ```
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python main.py --base $CFG --logdir experiments/
+# Train scripts for both the auto-encoder and generator are the same
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python main.py --base $CFG --logdir experiments/ # --ckpt path/to/ckpt
 ```
 
-## Sample Script
+## Sample&Evaluation Scripts
+We follow the implementation of StyleGAN-V(https://github.com/universome/stylegan-v) for evaluation.
 ```
-CUDA_VISIBLE_DEVICES=$CUDA python generate.py --base $CFG \
---resume experiments/$EXP/checkpoints/$PTH.ckpt \
---save_mode byframe --video_length 16 --total_sample_number 2048 \
---unconditional_guidance_scale $UC --ngpu 1 --batch_size 8 \
---parallel True --cur_part $CUR --total_part $TOTAL --seed $SEED
+# AutoEncoder
+bash scripts/script_for_sample_3c.sh $CUR $CUDA $TOTAL $CFG $EXP $PTH $UC_FRAME $UC_VIDEO $UC_DOMAIN
+bash scripts/script_for_fvd_3c.sh $EXP $UCFRAME $UCVID $UCDOMAIN $PTH $CUDA
+
+# Generator
+bash scripts/script_for_sample.sh $CFG $EXP $PTH $UC $CUR $TOTAL $CUDA
+bash scripts/script_for_fvd.sh $EXP $UC $PTH $CUDA
 ```
 
-## Scipt to Test FVD score
-We follow the implementation of StyleGAN-V(https://github.com/universome/stylegan-v).
-```
-CUDA_VISIBLE_DEVICES=$CUDA python src/scripts/calc_metrics_for_dataset.py \
---real_data_path $ROOT/$REAL_PATH \
---fake_data_path $ROOT/$FAKE_PATH \
---mirror 1 --gpus 1 --resolution $RESOLUTION \
---metrics fvd2048_16f --verbose 1 --use_cache 0
-```
+## Checkpoints
+Will be released soon.
 
 ## Test generation speed of prior methods
 

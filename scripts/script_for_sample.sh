@@ -1,5 +1,5 @@
 # Usage:
-# bash script_for_sample.sh CFG EXP PTH UC CUR TOTAL CUDA
+# bash scripts/script_for_sample.sh $CFG $EXP $PTH $UC $CUR $TOTAL $CUDA
 
 CFG=$1
 EXP=$2

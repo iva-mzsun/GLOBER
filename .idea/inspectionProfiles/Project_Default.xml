@@ -3,12 +3,12 @@
     <option name="myName" value="Project Default" />
     <inspection_tool class="JupyterKernelInspection" enabled="false" level="WARNING" enabled_by_default="false" />
     <inspection_tool class="PyAugmentAssignmentInspection" enabled="true" level="WEAK WARNING" enabled_by_default="true" />
+    <inspection_tool class="PyClassicStyleClassInspection" enabled="true" level="WARNING" enabled_by_default="true" />
     <inspection_tool class="PyMissingOrEmptyDocstringInspection" enabled="true" level="WEAK WARNING" enabled_by_default="true" />
-    <inspection_tool class="PyMissingTypeHintsInspection" enabled="true" level="WEAK WARNING" enabled_by_default="true" />
     <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
       <option name="ignoredPackages">
         <value>
-          <list size="73">
+          <list size="75">
             <item index="0" class="java.lang.String" itemvalue="tifffile" />
             <item index="1" class="java.lang.String" itemvalue="torch" />
             <item index="2" class="java.lang.String" itemvalue="numpy" />
@@ -82,6 +82,8 @@
             <item index="70" class="java.lang.String" itemvalue="fire" />
             <item index="71" class="java.lang.String" itemvalue="clip" />
             <item index="72" class="java.lang.String" itemvalue="nomi" />
+            <item index="73" class="java.lang.String" itemvalue="numba" />
+            <item index="74" class="java.lang.String" itemvalue="librosa" />
           </list>
         </value>
       </option>
